@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from benchmark_blackjack_common import (
+    check_runtime_shared_memory,
     MODEL_KEYS,
     calc_rate,
     now_tag,
@@ -45,6 +46,9 @@ def _preflight_runtime_dependencies() -> None:
         otel_err = validate_otel_histogram_api()
         if otel_err:
             raise SystemExit(otel_err)
+        shm_warn = check_runtime_shared_memory()
+        if shm_warn:
+            print(f"Warning: {shm_warn}")
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(
@@ -162,6 +166,47 @@ def main() -> None:
         default=8,
         help="Number of rollout agent workers.",
     )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        default=None,
+        help="Override prompt/response max length used by trainer.",
+    )
+    parser.add_argument(
+        "--rollout-max-model-len",
+        type=int,
+        default=None,
+        help="Override actor_rollout_ref.rollout.max_model_len.",
+    )
+    parser.add_argument(
+        "--rollout-max-num-batched-tokens",
+        type=int,
+        default=None,
+        help="Override actor_rollout_ref.rollout.max_num_batched_tokens.",
+    )
+    parser.add_argument(
+        "--rollout-max-num-seqs",
+        type=int,
+        default=None,
+        help="Override actor_rollout_ref.rollout.max_num_seqs.",
+    )
+    parser.add_argument(
+        "--rollout-gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Override actor_rollout_ref.rollout.gpu_memory_utilization.",
+    )
+    parser.add_argument(
+        "--rollout-n",
+        type=int,
+        default=None,
+        help="Override actor_rollout_ref.rollout.n.",
+    )
+    parser.add_argument(
+        "--ultra-low-mem",
+        action="store_true",
+        help="Force very conservative rollout settings to reduce vLLM startup memory.",
+    )
     args = parser.parse_args()
     _preflight_runtime_dependencies()
 
@@ -229,6 +274,30 @@ def main() -> None:
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
 
+        if args.max_len is not None:
+            max_len = args.max_len
+
+        rollout_max_model_len = args.rollout_max_model_len if args.rollout_max_model_len is not None else (max_len * 2)
+        rollout_max_num_batched_tokens = (
+            args.rollout_max_num_batched_tokens
+            if args.rollout_max_num_batched_tokens is not None
+            else (max_len * 4)
+        )
+        rollout_max_num_seqs = args.rollout_max_num_seqs if args.rollout_max_num_seqs is not None else 8
+
+        if args.rollout_gpu_memory_utilization is not None:
+            roll_util = args.rollout_gpu_memory_utilization
+        if args.rollout_n is not None:
+            rollout_n = args.rollout_n
+
+        if args.ultra_low_mem:
+            max_len = min(max_len, 128)
+            rollout_max_model_len = min(rollout_max_model_len, max_len * 2)
+            rollout_max_num_batched_tokens = min(rollout_max_num_batched_tokens, max_len * 2)
+            rollout_max_num_seqs = min(rollout_max_num_seqs, 2)
+            roll_util = min(roll_util, 0.20)
+            rollout_n = 1
+
         model_path, use_local_model = _resolve_model_path(model_id)
         print(f"Model {model_key}:       {model_path} (local={use_local_model})")
 
@@ -265,9 +334,9 @@ def main() -> None:
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
-            f"actor_rollout_ref.rollout.max_model_len={max_len * 2}",
-            f"actor_rollout_ref.rollout.max_num_batched_tokens={max_len * 4}",
-            "actor_rollout_ref.rollout.max_num_seqs=8",
+            f"actor_rollout_ref.rollout.max_model_len={rollout_max_model_len}",
+            f"actor_rollout_ref.rollout.max_num_batched_tokens={rollout_max_num_batched_tokens}",
+            f"actor_rollout_ref.rollout.max_num_seqs={rollout_max_num_seqs}",
             "actor_rollout_ref.rollout.enable_chunked_prefill=false",
             "actor_rollout_ref.rollout.enable_prefix_caching=false",
             "actor_rollout_ref.rollout.enforce_eager=true",
@@ -298,6 +367,7 @@ def main() -> None:
         if args.rollout_backend == "vllm":
             env["VLLM_USE_V1"] = "1"
         env.setdefault("VLLM_USE_TRITON", "0")
+        env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")

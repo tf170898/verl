@@ -5,6 +5,7 @@ import inspect
 import json
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -55,6 +56,27 @@ def validate_otel_histogram_api() -> str | None:
             "Reinstall aligned telemetry deps, e.g. "
             "`python3 -m pip install -U opentelemetry-api opentelemetry-sdk "
             "opentelemetry-semantic-conventions`."
+        )
+    return None
+
+
+def check_runtime_shared_memory(min_recommended_gib: int = 8) -> str | None:
+    """Return warning when /dev/shm is likely too small for vLLM multiprocess startup."""
+    shm_path = Path("/dev/shm")
+    if not shm_path.exists():
+        return None
+    try:
+        total = shutil.disk_usage(shm_path).total
+    except Exception:
+        return None
+
+    threshold = min_recommended_gib * (1024**3)
+    if total < threshold:
+        return (
+            f"/dev/shm is small ({total / (1024**3):.2f} GiB). "
+            "vLLM multiprocess startup may fail with allocator/shm errors "
+            "(e.g., std::bad_alloc, shm_broadcast cancelled). "
+            f"Recommended >= {min_recommended_gib} GiB."
         )
     return None
 

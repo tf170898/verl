@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from benchmark_blackjack_common import (
+    check_runtime_shared_memory,
     INFER_PROMPTS_TARGET,
     MODEL_KEYS,
     calc_rate,
@@ -48,6 +49,9 @@ def _preflight_runtime_dependencies() -> None:
         otel_err = validate_otel_histogram_api()
         if otel_err:
             raise SystemExit(otel_err)
+        shm_warn = check_runtime_shared_memory()
+        if shm_warn:
+            print(f"Warning: {shm_warn}")
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(
@@ -301,6 +305,7 @@ def main() -> None:
         # verl vLLM async server uses v1 AsyncLLM APIs.
         env["VLLM_USE_V1"] = "1"
         env.setdefault("VLLM_USE_TRITON", "0")
+        env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")
