@@ -193,12 +193,27 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
-            method=method,
-            timeout=timeout,
-            args=args,
-            kwargs=kwargs,
-        )
+        collective_rpc = getattr(self.engine, "collective_rpc", None)
+        if callable(collective_rpc):
+            maybe_awaitable = collective_rpc(
+                method=method,
+                timeout=timeout,
+                args=args,
+                kwargs=kwargs,
+            )
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+            return
+
+        # Compatibility fallback for engines without collective_rpc support.
+        if isinstance(method, str):
+            target = getattr(self.engine, method, None)
+            if callable(target):
+                maybe_awaitable = target(*args, **(kwargs or {}))
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+                return
+        raise AttributeError("AsyncLLM.collective_rpc is unavailable and no local method fallback exists")
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
@@ -637,7 +652,15 @@ class vLLMHttpServer:
             self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
         ) and not self.model_config.lora.get("merge", False):
             # Make sure we also check that the lora is already loaded in the engine
-            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            lora_loaded = False
+            list_loras = getattr(self.engine, "list_loras", None)
+            if callable(list_loras):
+                maybe_loras = list_loras()
+                if inspect.isawaitable(maybe_loras):
+                    maybe_loras = await maybe_loras
+                lora_loaded = VLLM_LORA_INT_ID in maybe_loras
+            else:
+                logger.warning("AsyncLLM.list_loras is unavailable; skipping dynamic LoRA attachment.")
             if lora_loaded:
                 lora_request = LoRARequest(
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
@@ -697,8 +720,19 @@ class vLLMHttpServer:
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
-            await self.engine.wake_up(tags=["kv_cache", "weights"])
-            await self.engine.reset_prefix_cache()
+            wake_up_fn = getattr(self.engine, "wake_up", None)
+            if callable(wake_up_fn):
+                maybe_awaitable = wake_up_fn(tags=["kv_cache", "weights"])
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                logger.warning("AsyncLLM.wake_up is unavailable; skip wake_up in colocated mode.")
+
+            reset_prefix_cache = getattr(self.engine, "reset_prefix_cache", None)
+            if callable(reset_prefix_cache):
+                maybe_awaitable = reset_prefix_cache()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -708,12 +742,30 @@ class vLLMHttpServer:
 
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here
-            await self.engine.collective_rpc("sleep", kwargs={"level": 2})
+            collective_rpc = getattr(self.engine, "collective_rpc", None)
+            if callable(collective_rpc):
+                maybe_awaitable = collective_rpc("sleep", kwargs={"level": 2})
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                sleep_fn = getattr(self.engine, "sleep", None)
+                if callable(sleep_fn):
+                    maybe_awaitable = sleep_fn(level=2)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+                else:
+                    logger.warning("AsyncLLM.collective_rpc/sleep unavailable; skip sleep in hybrid mode.")
 
             # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
             # await self.engine.reset_encoder_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            sleep_fn = getattr(self.engine, "sleep", None)
+            if callable(sleep_fn):
+                maybe_awaitable = sleep_fn(level=1)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                logger.warning("AsyncLLM.sleep is unavailable; skip sleep in colocated mode.")
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -723,7 +775,13 @@ class vLLMHttpServer:
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
         ):
-            await self.engine.start_profile(**kwargs)
+            start_profile = getattr(self.engine, "start_profile", None)
+            if callable(start_profile):
+                maybe_awaitable = start_profile(**kwargs)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                logger.warning("AsyncLLM.start_profile is unavailable; skip profiler start.")
 
     async def stop_profile(self):
         if (
@@ -731,14 +789,55 @@ class vLLMHttpServer:
             and self.profiler_controller.check_this_rank()
             and self.profiler_controller.is_discrete_mode()
         ):
-            await self.engine.stop_profile()
+            stop_profile = getattr(self.engine, "stop_profile", None)
+            if callable(stop_profile):
+                maybe_awaitable = stop_profile()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                logger.warning("AsyncLLM.stop_profile is unavailable; skip profiler stop.")
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
-            await self.engine.reset_prefix_cache()
+            reset_prefix_cache = getattr(self.engine, "reset_prefix_cache", None)
+            if callable(reset_prefix_cache):
+                maybe_awaitable = reset_prefix_cache()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            else:
+                logger.warning("AsyncLLM.reset_prefix_cache is unavailable; skip KV cache clear.")
 
     async def wait_for_requests_to_drain(self):
-        await self.engine.wait_for_requests_to_drain()
+        wait_for_drain = getattr(self.engine, "wait_for_requests_to_drain", None)
+        if callable(wait_for_drain):
+            maybe_awaitable = wait_for_drain()
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+            return
+
+        # Compatibility fallback for versions without wait_for_requests_to_drain.
+        output_processor = getattr(self.engine, "output_processor", None)
+        request_states = getattr(output_processor, "request_states", None)
+        if request_states is None:
+            logger.warning(
+                "AsyncLLM.wait_for_requests_to_drain is unavailable and no request_states found; "
+                "skipping drain wait."
+            )
+            return
+
+        timeout_s = 30.0
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            try:
+                pending = len(request_states)
+            except Exception:
+                pending = 0
+            if pending == 0:
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.warning("Timed out waiting to drain requests; %d request(s) still pending.", pending)
+                return
+            await asyncio.sleep(0.05)
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
@@ -756,22 +855,31 @@ class vLLMHttpServer:
                 - request_ids: List of aborted request IDs
         """
         try:
-            if _VLLM_VERSION >= version.parse("0.12.0"):
+            pause_generation = getattr(self.engine, "pause_generation", None)
+            output_processor = getattr(self.engine, "output_processor", None)
+            request_states = getattr(output_processor, "request_states", None)
+
+            if _VLLM_VERSION >= version.parse("0.12.0") and callable(pause_generation):
                 # Snapshot request IDs before pausing for reporting
-                request_ids = list(self.engine.output_processor.request_states.keys())
+                request_ids = list(request_states.keys()) if request_states is not None else []
 
                 # pause_generation with wait_for_inflight_requests=False will:
                 # 1. Set engine to paused state (blocks new generate calls)
                 # 2. Abort all in-flight requests
                 # 3. Wait for requests to drain
                 # 4. Clear prefix and mm caches if clear_cache=True
-                await self.engine.pause_generation(
+                maybe_awaitable = pause_generation(
                     wait_for_inflight_requests=False,
                     clear_cache=reset_prefix_cache,
                 )
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
             else:
+                if request_states is None:
+                    raise AttributeError("AsyncLLM.output_processor.request_states is unavailable")
+
                 # Take an atomic snapshot to avoid race conditions with the vLLM engine thread
-                request_states_snapshot = list(self.engine.output_processor.request_states.items())
+                request_states_snapshot = list(request_states.items())
                 request_ids = [req_id for req_id, _ in request_states_snapshot]
 
                 if not request_ids:
@@ -788,8 +896,15 @@ class vLLMHttpServer:
                     req_state.queue.put(request_output)
 
                 # Abort requests in the output processor and engine core
-                self.engine.output_processor.abort_requests(request_ids)
-                await self.engine.engine_core.abort_requests_async(request_ids)
+                abort_requests = getattr(output_processor, "abort_requests", None)
+                if callable(abort_requests):
+                    abort_requests(request_ids)
+                engine_core = getattr(self.engine, "engine_core", None)
+                abort_requests_async = getattr(engine_core, "abort_requests_async", None)
+                if callable(abort_requests_async):
+                    maybe_awaitable = abort_requests_async(request_ids)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
 
                 # Try to reset prefix cache to ensure clean state
                 if reset_prefix_cache:
@@ -812,7 +927,11 @@ class vLLMHttpServer:
         if self.node_rank != 0:
             return
         if _VLLM_VERSION >= version.parse("0.12.0"):
-            await self.engine.resume_generation()
+            resume_generation = getattr(self.engine, "resume_generation", None)
+            if callable(resume_generation):
+                maybe_awaitable = resume_generation()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -824,7 +943,10 @@ class vLLMHttpServer:
             dict[str, Any]: Dictionary containing abort result.
         """
         try:
-            request_states = self.engine.output_processor.request_states
+            output_processor = getattr(self.engine, "output_processor", None)
+            request_states = getattr(output_processor, "request_states", None)
+            if request_states is None:
+                return {"aborted": False, "error": "Engine request_states is unavailable"}
             req_state = request_states.get(request_id)
 
             if req_state is None:
@@ -839,8 +961,15 @@ class vLLMHttpServer:
             req_state.queue.put(request_output)
 
             # Abort in output processor and engine core
-            self.engine.output_processor.abort_requests([request_id])
-            await self.engine.engine_core.abort_requests_async([request_id])
+            abort_requests = getattr(output_processor, "abort_requests", None)
+            if callable(abort_requests):
+                abort_requests([request_id])
+            engine_core = getattr(self.engine, "engine_core", None)
+            abort_requests_async = getattr(engine_core, "abort_requests_async", None)
+            if callable(abort_requests_async):
+                maybe_awaitable = abort_requests_async([request_id])
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
 
             # Try to reset prefix cache to ensure clean state
             if reset_prefix_cache:
@@ -955,9 +1084,18 @@ class vLLMReplica(RolloutReplica):
 
     async def sleep(self):
         """Sleep each rollout server."""
+        if not self.config.free_cache_engine:
+            return
         # Drain DP engines for safe sleep.
-        await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        try:
+            await asyncio.wait_for(self.servers[0].wait_for_requests_to_drain.remote(), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for requests to drain before sleep; proceeding with best effort.")
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*[server.sleep.remote() for server in self.servers]), timeout=120.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out while sleeping vLLM servers; proceeding with best effort.")
 
     async def abort_all_requests(self) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.

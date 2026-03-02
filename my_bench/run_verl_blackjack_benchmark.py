@@ -233,6 +233,8 @@ def main() -> None:
             f"actor_rollout_ref.actor.fsdp_config.param_offload={actor_offload}",
             "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
             "actor_rollout_ref.rollout.name=vllm",
+            "actor_rollout_ref.rollout.free_cache_engine=false",
+            "actor_rollout_ref.rollout.enable_sleep_mode=false",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
