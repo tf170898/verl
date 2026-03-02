@@ -9,6 +9,7 @@ export PYTHONPATH="${THIS_DIR}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-mock}"
 export ROLLOUT_BACKEND
+export VERL_FORCE_NO_FLASH_ATTN="${VERL_FORCE_NO_FLASH_ATTN:-1}"
 if [[ "${ROLLOUT_BACKEND}" == "vllm" ]]; then
     export VLLM_USE_V1=1
 fi
@@ -78,6 +79,7 @@ mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
 echo "Using MODEL_PATH=${MODEL_PATH}"
 echo "HF_HOME=${HF_HOME} HF_HUB_CACHE=${HF_HUB_CACHE} TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE}"
 echo "ROLLOUT_BACKEND=${ROLLOUT_BACKEND} ROLLOUT_N=${ROLLOUT_N} ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE} ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS} ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS} ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} ROLLOUT_LOAD_FORMAT=${ROLLOUT_LOAD_FORMAT} ROLLOUT_CUDAGRAPH_MODE=${ROLLOUT_CUDAGRAPH_MODE}"
+echo "VERL_FORCE_NO_FLASH_ATTN=${VERL_FORCE_NO_FLASH_ATTN}"
 
 python3 - <<'PY'
 import importlib.util
@@ -118,6 +120,12 @@ python3 -m verl.trainer.main_ppo \
     data.val_batch_size=64 \
     data.dataloader_num_workers=0 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.use_remove_padding=False \
+    actor_rollout_ref.actor.use_remove_padding=False \
+    actor_rollout_ref.ref.use_remove_padding=False \
+    critic.model.use_remove_padding=False \
+    actor_rollout_ref.actor.use_dynamic_bsz=False \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False \
     +actor_rollout_ref.model.override_config.attn_implementation=eager \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \

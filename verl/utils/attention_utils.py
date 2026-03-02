@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import warnings
 from typing import Callable
 
 _index_first_axis, _pad_input, _rearrange, _unpad_input = None, None, None, None
@@ -24,10 +26,29 @@ def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
 
     global _index_first_axis, _pad_input, _rearrange, _unpad_input
 
+    # Return cached functions after first successful resolution.
+    if all(func is not None for func in (_index_first_axis, _pad_input, _rearrange, _unpad_input)):
+        return _index_first_axis, _pad_input, _rearrange, _unpad_input
+
     if is_torch_npu_available(check_device=False):
         from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
     else:
-        from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+        force_no_flash_attn = os.getenv("VERL_FORCE_NO_FLASH_ATTN", "").lower() in {"1", "true", "yes", "on"}
+        if force_no_flash_attn:
+            from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
+        else:
+            try:
+                from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+            except Exception as exc:
+                warnings.warn(
+                    (
+                        "Failed to import flash_attn.bert_padding; falling back to "
+                        "PyTorch padding helpers. This bypasses flash-attn ABI issues "
+                        f"but may reduce performance. Original error: {exc}"
+                    ),
+                    stacklevel=2,
+                )
+                from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
 
     _index_first_axis, _pad_input, _rearrange, _unpad_input = index_first_axis, pad_input, rearrange, unpad_input
 
