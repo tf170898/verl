@@ -349,6 +349,21 @@ def main() -> None:
             rollout_n = 1
 
         single_gpu_vllm_safe = args.rollout_backend == "vllm" and args.n_gpus_per_node == 1
+        multi_gpu_vllm_legacy_safe = (
+            args.rollout_backend == "vllm"
+            and args.n_gpus_per_node > 1
+            and not vllm_supports_bench_engine_overrides
+        )
+        if multi_gpu_vllm_legacy_safe:
+            # Avoid creating many independent TP=1 rollout replicas on vLLM 0.12.x,
+            # which is prone to startup crashes in this benchmark flow.
+            forced_roll_tp = _resolve_rollout_tp(args.n_gpus_per_node, args.n_gpus_per_node)
+            if roll_tp != forced_roll_tp:
+                print(
+                    f"Info: vLLM < 0.13 multi-GPU safety mode: forcing rollout TP "
+                    f"from {roll_tp} to {forced_roll_tp} to use one rollout replica."
+                )
+            roll_tp = forced_roll_tp
         if single_gpu_vllm_safe:
             # On single GPU, actor FSDP and vLLM rollout share the same device.
             # Keep rollout memory conservative and offload actor states to avoid startup OOM/bad_alloc.

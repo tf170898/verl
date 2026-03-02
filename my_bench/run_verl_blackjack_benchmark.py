@@ -276,6 +276,22 @@ def main() -> None:
             raise ValueError(f"Unsupported model key: {model_key}")
 
         single_gpu_vllm_safe = args.n_gpus_per_node == 1
+        multi_gpu_vllm_legacy_safe = args.n_gpus_per_node > 1 and not vllm_supports_bench_engine_overrides
+        if multi_gpu_vllm_legacy_safe:
+            forced_roll_tp = _resolve_rollout_tp(args.n_gpus_per_node, args.n_gpus_per_node)
+            forced_infer_tp = _resolve_rollout_tp(args.n_gpus_per_node, args.n_gpus_per_node)
+            if roll_tp != forced_roll_tp:
+                print(
+                    f"Info: vLLM < 0.13 multi-GPU safety mode: forcing rollout TP "
+                    f"from {roll_tp} to {forced_roll_tp} to use one rollout replica."
+                )
+            if infer_tp != forced_infer_tp:
+                print(
+                    f"Info: vLLM < 0.13 multi-GPU safety mode: forcing infer TP "
+                    f"from {infer_tp} to {forced_infer_tp} to use one rollout replica."
+                )
+            roll_tp = forced_roll_tp
+            infer_tp = forced_infer_tp
         if single_gpu_vllm_safe:
             actor_offload = "true"
             optimizer_offload = "true"
