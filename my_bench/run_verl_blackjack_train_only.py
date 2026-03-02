@@ -254,7 +254,8 @@ def main() -> None:
     )
     if args.rollout_backend == "vllm" and not vllm_supports_bench_engine_overrides:
         print(
-            "Info: vLLM < 0.13 detected; skipping bench-only compilation_config.use_* overrides."
+            "Info: vLLM < 0.13 detected; forcing safer rollout backend settings "
+            "(distributed_executor_backend=uni, V1 multiprocessing off)."
         )
 
     verl_root = args.verl_root.resolve()
@@ -445,9 +446,11 @@ def main() -> None:
                     f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
                 ]
             )
-            if single_gpu_vllm_safe:
+            if not vllm_supports_bench_engine_overrides:
                 train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
-            elif vllm_supports_bench_engine_overrides:
+            elif single_gpu_vllm_safe:
+                train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+            else:
                 train_cmd.extend(
                     [
                         "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
@@ -460,10 +463,13 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         if args.rollout_backend == "vllm":
             env["VLLM_USE_V1"] = "1"
-            env.setdefault("VLLM_USE_TRITON", "0")
-            env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-            if single_gpu_vllm_safe:
-                env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            env["VLLM_USE_TRITON"] = env.get("VLLM_USE_TRITON", "0")
+            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            if not vllm_supports_bench_engine_overrides:
+                # vLLM 0.12.x can be unstable in V1 multiprocess startup path.
+                env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            elif single_gpu_vllm_safe:
+                env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")

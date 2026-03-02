@@ -197,7 +197,8 @@ def main() -> None:
     vllm_supports_bench_engine_overrides = _vllm_supports_bench_engine_overrides()
     if not vllm_supports_bench_engine_overrides:
         print(
-            "Info: vLLM < 0.13 detected; skipping bench-only compilation_config.use_* overrides."
+            "Info: vLLM < 0.13 detected; forcing safer rollout backend settings "
+            "(distributed_executor_backend=uni, V1 multiprocessing off)."
         )
 
     verl_root = args.verl_root.resolve()
@@ -369,9 +370,11 @@ def main() -> None:
             "trainer.total_epochs=1",
             f"trainer.total_training_steps={steps}",
         ]
-        if single_gpu_vllm_safe:
+        if not vllm_supports_bench_engine_overrides:
             train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
-        elif vllm_supports_bench_engine_overrides:
+        elif single_gpu_vllm_safe:
+            train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+        else:
             train_cmd.extend(
                 [
                     "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
@@ -383,10 +386,12 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         # verl vLLM async server uses v1 AsyncLLM APIs.
         env["VLLM_USE_V1"] = "1"
-        env.setdefault("VLLM_USE_TRITON", "0")
-        env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        if single_gpu_vllm_safe:
-            env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        env["VLLM_USE_TRITON"] = env.get("VLLM_USE_TRITON", "0")
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if not vllm_supports_bench_engine_overrides:
+            env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        elif single_gpu_vllm_safe:
+            env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")
@@ -466,9 +471,11 @@ def main() -> None:
             "actor_rollout_ref.rollout.enable_prefix_caching=false",
             "actor_rollout_ref.rollout.enforce_eager=true",
         ]
-        if single_gpu_vllm_safe:
+        if not vllm_supports_bench_engine_overrides:
             infer_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
-        elif vllm_supports_bench_engine_overrides:
+        elif single_gpu_vllm_safe:
+            infer_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+        else:
             infer_cmd.extend(
                 [
                     "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",

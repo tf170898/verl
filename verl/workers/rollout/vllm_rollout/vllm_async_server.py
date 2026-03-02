@@ -232,6 +232,17 @@ class vLLMHttpServer:
             if "dtype" not in engine_kwargs:
                 engine_kwargs["dtype"] = engine_kwargs["torch_dtype"]
             engine_kwargs.pop("torch_dtype", None)
+        if _VLLM_VERSION <= version.parse("0.12.0"):
+            # vLLM 0.12.x is fragile in V1 multiprocess startup for 1-GPU-per-replica runs.
+            # Prefer uni backend and disable V1 multiprocessing to avoid shm_broadcast startup crashes.
+            single_gpu_per_replica = (
+                self.config.tensor_model_parallel_size == 1
+                and self.config.pipeline_model_parallel_size == 1
+                and self.config.data_parallel_size == 1
+            )
+            if single_gpu_per_replica:
+                engine_kwargs["distributed_executor_backend"] = "uni"
+                os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
