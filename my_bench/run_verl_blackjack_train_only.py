@@ -254,8 +254,7 @@ def main() -> None:
     )
     if args.rollout_backend == "vllm" and not vllm_supports_bench_engine_overrides:
         print(
-            "Info: vLLM < 0.13 detected; skipping bench-only engine kwargs "
-            "(distributed_executor_backend=uni and compilation_config.use_*)."
+            "Info: vLLM < 0.13 detected; skipping bench-only compilation_config.use_* overrides."
         )
 
     verl_root = args.verl_root.resolve()
@@ -308,6 +307,7 @@ def main() -> None:
             roll_tp = 1
             roll_util = 0.40
             actor_offload = "false"
+            optimizer_offload = "false"
             rollout_n = 1
         elif model_key == "qwen3-32b":
             model_id = "Qwen/Qwen3-32B"
@@ -318,6 +318,7 @@ def main() -> None:
             roll_tp = 4
             roll_util = 0.60
             actor_offload = "true"
+            optimizer_offload = "false"
             rollout_n = 1
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
@@ -345,6 +346,20 @@ def main() -> None:
             rollout_max_num_seqs = min(rollout_max_num_seqs, 2)
             roll_util = min(roll_util, 0.20)
             rollout_n = 1
+
+        single_gpu_vllm_safe = args.rollout_backend == "vllm" and args.n_gpus_per_node == 1
+        if single_gpu_vllm_safe:
+            # On single GPU, actor FSDP and vLLM rollout share the same device.
+            # Keep rollout memory conservative and offload actor states to avoid startup OOM/bad_alloc.
+            actor_offload = "true"
+            optimizer_offload = "true"
+            rollout_max_num_batched_tokens = min(rollout_max_num_batched_tokens, max_len * 2)
+            rollout_max_num_seqs = min(rollout_max_num_seqs, 2)
+            roll_util = min(roll_util, 0.20)
+            print(
+                "Info: enabling single-GPU-safe rollout settings "
+                "(uni backend, V1 multiprocessing off, offload on, conservative vLLM memory caps)."
+            )
 
         # Keep rollout infer parallelism valid for current trainer world size.
         resolved_roll_tp = _resolve_rollout_tp(roll_tp, args.n_gpus_per_node)
@@ -393,7 +408,7 @@ def main() -> None:
             "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.actor.use_kl_loss=false",
             f"actor_rollout_ref.actor.fsdp_config.param_offload={actor_offload}",
-            "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
+            f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={optimizer_offload}",
             f"actor_rollout_ref.rollout.name={args.rollout_backend}",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
@@ -430,7 +445,9 @@ def main() -> None:
                     f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
                 ]
             )
-            if vllm_supports_bench_engine_overrides:
+            if single_gpu_vllm_safe:
+                train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+            elif vllm_supports_bench_engine_overrides:
                 train_cmd.extend(
                     [
                         "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
@@ -445,6 +462,8 @@ def main() -> None:
             env["VLLM_USE_V1"] = "1"
             env.setdefault("VLLM_USE_TRITON", "0")
             env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+            if single_gpu_vllm_safe:
+                env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")

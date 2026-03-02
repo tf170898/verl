@@ -197,8 +197,7 @@ def main() -> None:
     vllm_supports_bench_engine_overrides = _vllm_supports_bench_engine_overrides()
     if not vllm_supports_bench_engine_overrides:
         print(
-            "Info: vLLM < 0.13 detected; skipping bench-only engine kwargs "
-            "(distributed_executor_backend=uni and compilation_config.use_*)."
+            "Info: vLLM < 0.13 detected; skipping bench-only compilation_config.use_* overrides."
         )
 
     verl_root = args.verl_root.resolve()
@@ -253,6 +252,7 @@ def main() -> None:
             roll_tp = 1
             roll_util = 0.40
             actor_offload = "false"
+            optimizer_offload = "false"
             rollout_n = 1
             infer_tp = 1
             infer_util = 0.85
@@ -266,12 +266,24 @@ def main() -> None:
             roll_tp = 4
             roll_util = 0.60
             actor_offload = "true"
+            optimizer_offload = "false"
             rollout_n = 1
             infer_tp = 4
             infer_util = 0.70
             infer_resp_len = 128
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
+
+        single_gpu_vllm_safe = args.n_gpus_per_node == 1
+        if single_gpu_vllm_safe:
+            actor_offload = "true"
+            optimizer_offload = "true"
+            roll_util = min(roll_util, 0.20)
+            infer_util = min(infer_util, 0.20)
+            print(
+                "Info: enabling single-GPU-safe rollout settings "
+                "(uni backend, V1 multiprocessing off, offload on, conservative vLLM memory caps)."
+            )
 
         resolved_roll_tp = _resolve_rollout_tp(roll_tp, args.n_gpus_per_node)
         if resolved_roll_tp != roll_tp:
@@ -325,7 +337,7 @@ def main() -> None:
             "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.actor.use_kl_loss=false",
             f"actor_rollout_ref.actor.fsdp_config.param_offload={actor_offload}",
-            "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
+            f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={optimizer_offload}",
             "actor_rollout_ref.rollout.name=vllm",
             "++actor_rollout_ref.rollout.free_cache_engine=false",
             "++actor_rollout_ref.rollout.enable_sleep_mode=false",
@@ -357,7 +369,9 @@ def main() -> None:
             "trainer.total_epochs=1",
             f"trainer.total_training_steps={steps}",
         ]
-        if vllm_supports_bench_engine_overrides:
+        if single_gpu_vllm_safe:
+            train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+        elif vllm_supports_bench_engine_overrides:
             train_cmd.extend(
                 [
                     "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
@@ -371,6 +385,8 @@ def main() -> None:
         env["VLLM_USE_V1"] = "1"
         env.setdefault("VLLM_USE_TRITON", "0")
         env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        if single_gpu_vllm_safe:
+            env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")
@@ -450,7 +466,9 @@ def main() -> None:
             "actor_rollout_ref.rollout.enable_prefix_caching=false",
             "actor_rollout_ref.rollout.enforce_eager=true",
         ]
-        if vllm_supports_bench_engine_overrides:
+        if single_gpu_vllm_safe:
+            infer_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+        elif vllm_supports_bench_engine_overrides:
             infer_cmd.extend(
                 [
                     "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
