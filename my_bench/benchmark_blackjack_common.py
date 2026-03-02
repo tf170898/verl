@@ -149,11 +149,13 @@ def resolve_blackjack_data(
     out_data_dir: Path,
     train_samples: int,
     test_samples: int,
+    prefer_existing_env_parquet: bool = False,
 ) -> tuple[Path, Path, Path]:
     env_dir = find_blackjack_env_dir(verl_root)
-    existing = find_existing_blackjack_parquet(env_dir)
-    if existing is not None:
-        return existing[0], existing[1], env_dir
+    if prefer_existing_env_parquet:
+        existing = find_existing_blackjack_parquet(env_dir)
+        if existing is not None:
+            return existing[0], existing[1], env_dir
 
     train_path = out_data_dir / "blackjack_train.parquet"
     test_path = out_data_dir / "blackjack_test.parquet"
@@ -241,6 +243,29 @@ def _extract_action(text: str) -> str:
     return ""
 
 
+def _extract_first_response_text(responses) -> str:
+    if isinstance(responses, np.ndarray):
+        responses = responses.tolist()
+    if isinstance(responses, (list, tuple)):
+        if not responses:
+            return ""
+        first = responses[0]
+    else:
+        first = responses
+
+    if first is None:
+        return ""
+    if isinstance(first, str):
+        return first
+    if isinstance(first, dict):
+        for key in ("text", "content", "response"):
+            val = first.get(key)
+            if isinstance(val, str):
+                return val
+        return str(first)
+    return str(first)
+
+
 def parse_verl_infer_accuracy(infer_parquet: Path) -> str:
     if not infer_parquet.exists():
         return "na"
@@ -250,12 +275,10 @@ def parse_verl_infer_accuracy(infer_parquet: Path) -> str:
 
     ok = 0
     for _, row in df.iterrows():
-        responses = row.get("responses", [])
-        if isinstance(responses, np.ndarray):
-            responses = responses.tolist()
-        if not responses:
+        response_text = _extract_first_response_text(row.get("responses", []))
+        if not response_text:
             continue
-        pred = _extract_action(responses[0])
+        pred = _extract_action(response_text)
         reward_model = row.get("reward_model", {})
         gt = ""
         if isinstance(reward_model, dict):
@@ -287,6 +310,7 @@ def write_summary_csv(path: Path, rows: list[dict[str, str]]) -> None:
         "train_step",
         "train_loss",
         "train_reward",
+        "extra_metric_name",
         "extra_metric",
         "log_file",
     ]
@@ -322,12 +346,15 @@ def write_summary_md(path: Path, rows: list[dict[str, str]], *, title: str) -> N
     lines.append("")
     lines.append("## Extra Metrics")
     lines.append("")
-    lines.append("| framework | phase | model | extra_metric |")
-    lines.append("|---|---|---|---:|")
+    lines.append("| framework | phase | model | extra_metric_name | extra_metric |")
+    lines.append("|---|---|---|---|---:|")
     for r in rows:
         lines.append(
-            f"| {r['framework']} | {r['phase']} | {r['model']} | {r['extra_metric']} |"
+            f"| {r['framework']} | {r['phase']} | {r['model']} | {r['extra_metric_name']} | {r['extra_metric']} |"
         )
+    lines.append("")
+    lines.append(
+        "> Note: `action_acc` and `reward_mean` are different metrics and should not be compared directly."
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-

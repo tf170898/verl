@@ -10,7 +10,6 @@ from benchmark_blackjack_common import (
     now_tag,
     parse_redstone_infer_reward,
     parse_redstone_train_metrics,
-    resolve_blackjack_data,
     run_with_logging,
     write_summary_csv,
     write_summary_md,
@@ -29,7 +28,7 @@ def main() -> None:
         "--verl-root",
         type=Path,
         default=Path(__file__).resolve().parent.parent,
-        help="Path to verl repo root (for blackjack env/data discovery).",
+        help="Path to verl repo root (used only for default output location).",
     )
     parser.add_argument(
         "--redstone-root",
@@ -43,8 +42,18 @@ def main() -> None:
         default="all",
         help="Model key to run. Use 'all' for both.",
     )
-    parser.add_argument("--train-samples", type=int, default=4096)
-    parser.add_argument("--test-samples", type=int, default=512)
+    parser.add_argument(
+        "--train-samples",
+        type=int,
+        default=4096,
+        help="Ignored for redstone benchmark (redstone blackjack uses online env rollouts).",
+    )
+    parser.add_argument(
+        "--test-samples",
+        type=int,
+        default=512,
+        help="Ignored for redstone benchmark (redstone blackjack uses online env rollouts).",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -61,22 +70,10 @@ def main() -> None:
         out_root = args.output_root.resolve()
 
     logs_dir = out_root / "logs"
-    data_dir = out_root / "data"
     summary_csv = out_root / "summary.csv"
     summary_md = out_root / "summary.md"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve blackjack dataset once for parity with verl benchmarks.
-    train_parquet, test_parquet, env_dir = resolve_blackjack_data(
-        verl_root=verl_root,
-        out_data_dir=data_dir,
-        train_samples=args.train_samples,
-        test_samples=args.test_samples,
-    )
-    print(f"Using blackjack env dir: {env_dir}")
-    print(f"Reference train parquet: {train_parquet}")
-    print(f"Reference test parquet:  {test_parquet}")
+    print("Redstone benchmark uses online blackjack env rollouts; parquet train/test samples are not used.")
     print(f"Output root:             {out_root}")
 
     rows: list[dict[str, str]] = []
@@ -197,6 +194,7 @@ def main() -> None:
                 "train_step": train_step,
                 "train_loss": train_loss,
                 "train_reward": train_reward,
+                "extra_metric_name": "na",
                 "extra_metric": "na",
                 "log_file": str(train_log),
             }
@@ -251,6 +249,7 @@ def main() -> None:
                 "train_step": "na",
                 "train_loss": "na",
                 "train_reward": "na",
+                "extra_metric_name": "reward_mean",
                 "extra_metric": infer_reward,
                 "log_file": str(infer_log),
             }
@@ -264,4 +263,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

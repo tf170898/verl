@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 
@@ -24,6 +25,19 @@ def _model_list(model_arg: str) -> list[str]:
     if model_arg == "all":
         return list(MODEL_KEYS)
     return [model_arg]
+
+
+def _preflight_runtime_dependencies() -> None:
+    required = ("ray", "transformers", "vllm")
+    missing = [m for m in required if importlib.util.find_spec(m) is None]
+    if not missing:
+        return
+    missing_csv = ", ".join(missing)
+    raise SystemExit(
+        "Missing Python package(s): "
+        f"{missing_csv}. Install verl with vLLM extras in the same runtime env, e.g. "
+        "`python3 -m pip install -e '.[vllm]'` from the verl repo root."
+    )
 
 
 def _find_hf_cache_snapshot(model_id: str) -> Path | None:
@@ -88,6 +102,23 @@ def main() -> None:
     parser.add_argument("--train-samples", type=int, default=4096)
     parser.add_argument("--test-samples", type=int, default=512)
     parser.add_argument(
+        "--train-max-samples",
+        type=int,
+        default=256,
+        help="Max training samples consumed by verl trainer from train parquet.",
+    )
+    parser.add_argument(
+        "--val-max-samples",
+        type=int,
+        default=64,
+        help="Max validation samples consumed by verl trainer from test parquet.",
+    )
+    parser.add_argument(
+        "--use-env-parquet",
+        action="store_true",
+        help="Reuse existing parquet found under my_bench/blackjeck_env or my_bench/blackjack_env.",
+    )
+    parser.add_argument(
         "--attn-impl",
         choices=("sdpa", "eager", "flash_attention_2", "flash_attention_3"),
         default="sdpa",
@@ -100,6 +131,7 @@ def main() -> None:
         help="Benchmark output dir. Default: my_bench/results/verl_<timestamp>",
     )
     args = parser.parse_args()
+    _preflight_runtime_dependencies()
 
     verl_root = args.verl_root.resolve()
     if args.output_root is None:
@@ -124,6 +156,7 @@ def main() -> None:
         out_data_dir=data_dir,
         train_samples=args.train_samples,
         test_samples=args.test_samples,
+        prefer_existing_env_parquet=args.use_env_parquet,
     )
     infer_subset = data_dir / f"blackjack_test_{INFER_PROMPTS_TARGET}.parquet"
     infer_prompts = prepare_infer_subset(test_parquet, infer_subset, INFER_PROMPTS_TARGET)
@@ -131,6 +164,10 @@ def main() -> None:
     print(f"Using blackjack env dir: {env_dir}")
     print(f"Using train parquet: {train_parquet}")
     print(f"Using test parquet:  {test_parquet}")
+    if args.use_env_parquet:
+        print("Dataset source:      existing env parquet")
+    else:
+        print("Dataset source:      generated benchmark parquet")
     print(f"Output root:         {out_root}")
     print(f"Attention impl:      {args.attn_impl}")
 
@@ -176,8 +213,8 @@ def main() -> None:
             "algorithm.adv_estimator=grpo",
             f"data.train_files={train_parquet}",
             f"data.val_files={test_parquet}",
-            "data.train_max_samples=256",
-            "data.val_max_samples=64",
+            f"data.train_max_samples={args.train_max_samples}",
+            f"data.val_max_samples={args.val_max_samples}",
             f"data.train_batch_size={train_bsz}",
             f"data.max_prompt_length={max_len}",
             f"data.max_response_length={max_len}",
@@ -256,6 +293,7 @@ def main() -> None:
                 "train_step": train_step,
                 "train_loss": train_loss,
                 "train_reward": train_reward,
+                "extra_metric_name": "na",
                 "extra_metric": "na",
                 "log_file": str(train_log),
             }
@@ -307,6 +345,7 @@ def main() -> None:
                 "train_step": "na",
                 "train_loss": "na",
                 "train_reward": "na",
+                "extra_metric_name": "action_acc",
                 "extra_metric": infer_acc,
                 "log_file": str(infer_log),
             }

@@ -359,7 +359,7 @@ PY
 
 echo "framework,phase,model,status,elapsed_sec,throughput,unit,train_step,train_loss,train_reward,extra_metric,log_file" > "${SUMMARY_CSV}"
 
-INFER_SUBSET="${DATA_DIR}/gsm8k_test_${INFER_PROMPTS_TARGET}.parquet"
+INFER_SUBSET="${DATA_DIR}/blackjack_test_${INFER_PROMPTS_TARGET}.parquet"
 INFER_PROMPTS="$(prepare_infer_subset "${TEST_PARQUET}" "${INFER_SUBSET}" "${INFER_PROMPTS_TARGET}")"
 
 run_verl_train() {

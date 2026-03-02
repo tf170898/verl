@@ -212,6 +212,11 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        if "torch_dtype" in engine_kwargs:
+            # vLLM deprecated `torch_dtype` in favor of `dtype`.
+            if "dtype" not in engine_kwargs:
+                engine_kwargs["dtype"] = engine_kwargs["torch_dtype"]
+            engine_kwargs.pop("torch_dtype", None)
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
@@ -439,39 +444,112 @@ class vLLMHttpServer:
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
-        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-        vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        create_engine_sig = inspect.signature(engine_args.create_engine_config)
+        if "usage_context" in create_engine_sig.parameters:
+            vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+        else:
+            vllm_config = engine_args.create_engine_config()
+        model_config = getattr(vllm_config, "model_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        if parallel_config is not None and hasattr(parallel_config, "data_parallel_master_port"):
+            parallel_config.data_parallel_master_port = self._dp_master_port
+        else:
+            logger.warning(
+                "vLLM config has no parallel_config.data_parallel_master_port; "
+                "skipping data-parallel master port injection."
+            )
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
-        if "enable_log_requests" in fn_args:
+        if "enable_log_requests" in fn_args and hasattr(engine_args, "enable_log_requests"):
             kwargs["enable_log_requests"] = engine_args.enable_log_requests
-        if "disable_log_stats" in fn_args:
+        if "disable_log_stats" in fn_args and hasattr(engine_args, "disable_log_stats"):
             kwargs["disable_log_stats"] = engine_args.disable_log_stats
+        if "usage_context" in fn_args:
+            kwargs["usage_context"] = usage_context
 
-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, **kwargs)
 
-        # Don't keep the dummy data in memory
-        await engine_client.reset_mm_cache()
-        await engine_client.collective_rpc(
-            method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
-        )
+        # vLLM APIs vary by version; reset_mm_cache is not always available.
+        reset_mm_cache = getattr(engine_client, "reset_mm_cache", None)
+        if callable(reset_mm_cache):
+            maybe_awaitable = reset_mm_cache()
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+        collective_rpc = getattr(engine_client, "collective_rpc", None)
+        if callable(collective_rpc):
+            maybe_awaitable = collective_rpc(
+                method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
+            )
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
+        else:
+            logger.warning(
+                "AsyncLLM.collective_rpc is unavailable in current vLLM; "
+                "skipping monkey_patch_model compatibility hook."
+            )
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
         if "supported_tasks" in build_app_sig.parameters:
-            supported_tasks = await engine_client.get_supported_tasks()
+            get_supported_tasks = getattr(engine_client, "get_supported_tasks", None)
+            if callable(get_supported_tasks):
+                maybe_tasks = get_supported_tasks()
+                if inspect.isawaitable(maybe_tasks):
+                    maybe_tasks = await maybe_tasks
+                supported_tasks = tuple(maybe_tasks)
             app = build_app(args, supported_tasks)
         else:
             app = build_app(args)
 
         init_app_sig = inspect.signature(init_app_state)
-        if "vllm_config" in init_app_sig.parameters:
-            await init_app_state(engine_client, vllm_config, app.state, args)
-        elif "supported_tasks" in init_app_sig.parameters:
-            await init_app_state(engine_client, app.state, args, supported_tasks)
+        init_params = init_app_sig.parameters
+        # Build kwargs by parameter name to survive vLLM API drift across versions.
+        init_kwargs: dict[str, Any] = {}
+        for name, p in init_params.items():
+            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if name in {"engine_client", "engine", "llm_engine", "client"}:
+                init_kwargs[name] = engine_client
+            elif name in {"vllm_config", "config"}:
+                init_kwargs[name] = vllm_config
+            elif name == "model_config":
+                # Newer vLLM expects model_config, older versions may still pass vllm_config.
+                init_kwargs[name] = model_config if model_config is not None else vllm_config
+            elif name in {"app_state", "state"}:
+                init_kwargs[name] = app.state
+            elif name in {"args", "cli_args"}:
+                init_kwargs[name] = args
+            elif name in {"supported_tasks", "tasks"}:
+                init_kwargs[name] = supported_tasks
+
+        # Ensure all required parameters are provided; otherwise try common legacy call forms.
+        missing_required = [
+            name
+            for name, p in init_params.items()
+            if p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and p.default is inspect._empty
+            and name not in init_kwargs
+        ]
+        if not missing_required:
+            await init_app_state(**init_kwargs)
         else:
-            await init_app_state(engine_client, app.state, args)
+            fallback_calls = [
+                (engine_client, model_config if model_config is not None else vllm_config, app.state, args),
+                (engine_client, vllm_config, app.state, args),
+                (engine_client, app.state, args, supported_tasks),
+                (engine_client, app.state, args),
+            ]
+            last_exc = None
+            for call_args in fallback_calls:
+                try:
+                    await init_app_state(*call_args)
+                    last_exc = None
+                    break
+                except TypeError as e:
+                    last_exc = e
+            if last_exc is not None:
+                raise last_exc
         if self.replica_rank == 0 and self.node_rank == 0:
             logger.info(f"Initializing a V1 LLM engine with config: {vllm_config}")
 
