@@ -7,9 +7,8 @@ PROJECT_ROOT="$(cd "${THIS_DIR}/../../.." && pwd)"
 # Ensure all subprocesses (including Ray/vLLM workers) load local startup shims.
 export PYTHONPATH="${THIS_DIR}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# vLLM v1 stack in some images pulls incompatible triton_kernels at startup.
-# Force v0 path for maximum compatibility in this smoke test.
-export VLLM_USE_V1=0
+# This rollout path is built around vLLM v1 in current verl.
+export VLLM_USE_V1=1
 
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/tests/special_e2e/blackjack/output}"
 DATA_DIR="${DATA_DIR:-${OUTPUT_DIR}/data}"
@@ -20,9 +19,62 @@ VAL_SIZE="${VAL_SIZE:-64}"
 DATASET_SEED="${DATASET_SEED:-42}"
 
 NUM_GPUS="${NUM_GPUS:-8}"
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-1.7B}"
+ROLLOUT_N="${ROLLOUT_N:-2}"
+ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-8}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-128}"
+ROLLOUT_MAX_BATCHED_TOKENS="${ROLLOUT_MAX_BATCHED_TOKENS:-128}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-32}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.35}"
+ROLLOUT_LOAD_FORMAT="${ROLLOUT_LOAD_FORMAT:-auto}"
+ROLLOUT_CUDAGRAPH_MODE="${ROLLOUT_CUDAGRAPH_MODE:-PIECEWISE}"
+
+# Prefer local Hugging Face cache rooted at /models and avoid online downloads.
+MODEL_CACHE_ROOT="${MODEL_CACHE_ROOT:-/models}"
+MODEL_REPO_ID="${MODEL_REPO_ID:-Qwen/Qwen3-1.7B}"
+export HF_HOME="${HF_HOME:-${MODEL_CACHE_ROOT}}"
+if [[ -d "${MODEL_CACHE_ROOT}/hub" ]]; then
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${MODEL_CACHE_ROOT}/hub}"
+else
+    export HF_HUB_CACHE="${HF_HUB_CACHE:-${MODEL_CACHE_ROOT}}"
+fi
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+
+resolve_local_snapshot_path() {
+    local repo_id="$1"
+    local repo_key="${repo_id//\//--}"
+    local model_dir=""
+    local snapshot_path=""
+
+    if [[ -d "${MODEL_CACHE_ROOT}/models--${repo_key}" ]]; then
+        model_dir="${MODEL_CACHE_ROOT}/models--${repo_key}"
+    elif [[ -d "${HF_HUB_CACHE}/models--${repo_key}" ]]; then
+        model_dir="${HF_HUB_CACHE}/models--${repo_key}"
+    else
+        return 1
+    fi
+
+    snapshot_path="$(ls -1dt "${model_dir}/snapshots/"* 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${snapshot_path}" || ! -d "${snapshot_path}" ]]; then
+        return 1
+    fi
+    printf '%s\n' "${snapshot_path}"
+}
+
+if [[ -z "${MODEL_PATH:-}" ]]; then
+    MODEL_PATH="$(resolve_local_snapshot_path "${MODEL_REPO_ID}" || true)"
+    if [[ -z "${MODEL_PATH}" ]]; then
+        echo "Unable to find local snapshot for ${MODEL_REPO_ID} under ${MODEL_CACHE_ROOT} or ${HF_HUB_CACHE}." >&2
+        echo "Set MODEL_PATH to a local model directory (for example: /models/models--Qwen--Qwen3-1.7B/snapshots/<commit>)."
+        exit 1
+    fi
+fi
 
 mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
+echo "Using MODEL_PATH=${MODEL_PATH}"
+echo "HF_HOME=${HF_HOME} HF_HUB_CACHE=${HF_HUB_CACHE} TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE}"
+echo "ROLLOUT_N=${ROLLOUT_N} ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE} ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS} ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS} ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} ROLLOUT_LOAD_FORMAT=${ROLLOUT_LOAD_FORMAT} ROLLOUT_CUDAGRAPH_MODE=${ROLLOUT_CUDAGRAPH_MODE}"
 
 python3 - <<'PY'
 import importlib.util
@@ -66,11 +118,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.rollout.n=2 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+    actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
+    actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP_SIZE}" \
+    actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
+    actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_BATCHED_TOKENS}" \
+    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
+    actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
+    actor_rollout_ref.rollout.load_format="${ROLLOUT_LOAD_FORMAT}" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="${ROLLOUT_CUDAGRAPH_MODE}" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
+    actor_rollout_ref.rollout.enable_chunked_prefill=True \
+    actor_rollout_ref.rollout.enable_prefix_caching=False \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     +critic.model.override_config.attn_implementation=eager \
