@@ -51,7 +51,9 @@ python3 -m verl.trainer.main_ppo \
     data.val_batch_size=64 \
     data.dataloader_num_workers=0 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.override_config.attn_implementation=eager \
     actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -63,6 +65,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
+    critic.model.override_config.attn_implementation=eager \
+    critic.model.fsdp_config.model_dtype=bf16 \
     algorithm.use_kl_in_reward=False \
     reward.custom_reward_function.path="${THIS_DIR}/blackjack_reward.py" \
     reward.custom_reward_function.name=compute_score \
