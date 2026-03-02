@@ -260,6 +260,7 @@ def main() -> None:
             'trainer.logger=["console","file"]',
             "trainer.project_name=bench_verl_blackjack",
             f"trainer.experiment_name=verl_train_{model_key}",
+            "++ray_kwargs.ray_init.include_dashboard=false",
             "trainer.nnodes=1",
             "trainer.n_gpus_per_node=8",
             "trainer.save_freq=-1",
@@ -271,6 +272,7 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         # verl vLLM async server uses v1 AsyncLLM APIs.
         env["VLLM_USE_V1"] = "1"
+        env.setdefault("RAY_raylet_start_wait_time_s", "120")
         if use_local_model:
             # Prevent remote hub calls when local model files are available.
             env["HF_HUB_OFFLINE"] = "1"
