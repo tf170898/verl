@@ -13,6 +13,7 @@ from benchmark_blackjack_common import (
     parse_verl_train_metrics,
     resolve_blackjack_data,
     run_with_logging,
+    validate_otel_histogram_api,
     write_summary_csv,
     write_summary_md,
 )
@@ -41,6 +42,9 @@ def _preflight_runtime_dependencies() -> None:
                 f"Detected vllm version: {vllm_version}. "
                 "Please install a compatible vLLM version (for this repo, setup.py expects <=0.12.0)."
             )
+        otel_err = validate_otel_histogram_api()
+        if otel_err:
+            raise SystemExit(otel_err)
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(
@@ -133,6 +137,12 @@ def main() -> None:
         choices=("sdpa", "eager", "flash_attention_2", "flash_attention_3"),
         default="sdpa",
         help="HF attention implementation for verl model loading.",
+    )
+    parser.add_argument(
+        "--rollout-backend",
+        choices=("vllm",),
+        default="vllm",
+        help="Rollout backend for verl PPO (currently only vllm is supported by this benchmark script).",
     )
     parser.add_argument(
         "--output-root",
@@ -235,7 +245,7 @@ def main() -> None:
             "actor_rollout_ref.actor.use_kl_loss=false",
             f"actor_rollout_ref.actor.fsdp_config.param_offload={actor_offload}",
             "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
-            "actor_rollout_ref.rollout.name=vllm",
+            f"actor_rollout_ref.rollout.name={args.rollout_backend}",
             "++actor_rollout_ref.rollout.free_cache_engine=false",
             "++actor_rollout_ref.rollout.enable_sleep_mode=false",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
@@ -263,7 +273,9 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         if args.rollout_backend == "vllm":
             env["VLLM_USE_V1"] = "1"
-        env.setdefault("RAY_raylet_start_wait_time_s", "120")
+        env.setdefault("RAY_DISABLE_DASHBOARD", "1")
+        env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
+        env.setdefault("RAY_raylet_start_wait_time_s", "300")
         if use_local_model:
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"

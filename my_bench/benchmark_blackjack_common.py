@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
 import random
 import re
@@ -15,6 +16,35 @@ import pandas as pd
 
 MODEL_KEYS = ("qwen3-1.7b", "qwen3-32b")
 INFER_PROMPTS_TARGET = 256
+
+
+def validate_otel_histogram_api() -> str | None:
+    """Return an error message when OpenTelemetry histogram API is incompatible with Ray."""
+    try:
+        from opentelemetry.sdk.metrics import MeterProvider
+    except Exception:
+        # If OpenTelemetry is not installed, leave validation to Ray startup.
+        return None
+
+    try:
+        meter = MeterProvider().get_meter("verl_bench_preflight")
+        params = inspect.signature(meter.create_histogram).parameters
+    except Exception as e:
+        return (
+            "Failed to validate OpenTelemetry metrics API used by Ray: "
+            f"{type(e).__name__}: {e}"
+        )
+
+    if "explicit_bucket_boundaries_advisory" not in params:
+        return (
+            "Incompatible OpenTelemetry installation detected for Ray dashboard agent: "
+            "Meter.create_histogram() does not accept "
+            "`explicit_bucket_boundaries_advisory`. "
+            "Reinstall aligned telemetry deps, e.g. "
+            "`python3 -m pip install -U opentelemetry-api opentelemetry-sdk "
+            "opentelemetry-semantic-conventions`."
+        )
+    return None
 
 
 def now_tag() -> str:

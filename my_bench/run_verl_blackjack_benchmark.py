@@ -16,6 +16,7 @@ from benchmark_blackjack_common import (
     prepare_infer_subset,
     resolve_blackjack_data,
     run_with_logging,
+    validate_otel_histogram_api,
     write_summary_csv,
     write_summary_md,
 )
@@ -44,6 +45,9 @@ def _preflight_runtime_dependencies() -> None:
                 f"Detected vllm version: {vllm_version}. "
                 "Please install a compatible vLLM version (for this repo, setup.py expects <=0.12.0)."
             )
+        otel_err = validate_otel_histogram_api()
+        if otel_err:
+            raise SystemExit(otel_err)
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(
@@ -272,7 +276,9 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         # verl vLLM async server uses v1 AsyncLLM APIs.
         env["VLLM_USE_V1"] = "1"
-        env.setdefault("RAY_raylet_start_wait_time_s", "120")
+        env.setdefault("RAY_DISABLE_DASHBOARD", "1")
+        env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
+        env.setdefault("RAY_raylet_start_wait_time_s", "300")
         if use_local_model:
             # Prevent remote hub calls when local model files are available.
             env["HF_HUB_OFFLINE"] = "1"
