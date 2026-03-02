@@ -4,6 +4,13 @@ set -xeuo pipefail
 THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${THIS_DIR}/../../.." && pwd)"
 
+# Ensure all subprocesses (including Ray/vLLM workers) load local startup shims.
+export PYTHONPATH="${THIS_DIR}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# vLLM v1 stack in some images pulls incompatible triton_kernels at startup.
+# Force v0 path for maximum compatibility in this smoke test.
+export VLLM_USE_V1=0
+
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/tests/special_e2e/blackjack/output}"
 DATA_DIR="${DATA_DIR:-${OUTPUT_DIR}/data}"
 LOG_PATH="${LOG_PATH:-${OUTPUT_DIR}/blackjack_qwen3_1p7b_8gpu.log}"
