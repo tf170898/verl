@@ -31,6 +31,19 @@ def _preflight_runtime_dependencies() -> None:
     required = ("ray", "transformers", "vllm")
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
+        # vLLM rollout weight sync depends on AsyncLLM.collective_rpc.
+        try:
+            from vllm import __version__ as vllm_version
+            from vllm.v1.engine.async_llm import AsyncLLM
+        except Exception as e:
+            raise SystemExit(f"Failed to import vLLM runtime APIs: {type(e).__name__}: {e}") from e
+        if not hasattr(AsyncLLM, "collective_rpc"):
+            raise SystemExit(
+                "Incompatible vLLM build detected: AsyncLLM.collective_rpc is missing, "
+                "but verl vLLM rollout requires it for weight sync. "
+                f"Detected vllm version: {vllm_version}. "
+                "Please install a compatible vLLM version (for this repo, setup.py expects <=0.12.0)."
+            )
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(

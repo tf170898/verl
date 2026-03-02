@@ -176,15 +176,28 @@ class ServerAdapter(BaseRollout):
         s.setsockopt(zmq.SNDTIMEO, timeout_ms)
         s.bind(self.zmq_handle)
 
+        async def _check_future_ready() -> None:
+            if future is not None:
+                ready, _ = ray.wait([future], timeout=0)
+                if ready:
+                    await future
+
+        async def _send_obj(obj, stage: str) -> None:
+            try:
+                s.send_pyobj(obj)
+            except zmq.error.Again as e:
+                await _check_future_ready()
+                raise TimeoutError(
+                    "Timed out sending rollout weight-sync payload "
+                    f"at stage '{stage}' after {timeout_ms}ms. "
+                    "This often indicates rollout worker-side RPC did not start."
+                ) from e
+
         async def _recv_ack(stage: str) -> None:
             try:
                 s.recv()
             except zmq.error.Again as e:
-                if future is not None:
-                    ready, _ = ray.wait([future], timeout=0)
-                    if ready:
-                        # Surface the original worker-side exception when available.
-                        await future
+                await _check_future_ready()
                 raise TimeoutError(
                     "Timed out waiting for rollout weight-sync acknowledgment "
                     f"at stage '{stage}' after {timeout_ms}ms. "
@@ -192,11 +205,14 @@ class ServerAdapter(BaseRollout):
                     "(e.g., missing collective RPC support in installed vLLM)."
                 ) from e
 
+        # Surface immediate worker-side failures (e.g. missing collective_rpc) before ZMQ send path.
+        await _check_future_ready()
+
         buffer, shm = None, None
         if not self.use_shm:
             buffer = torch.empty(bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
-            s.send_pyobj(handle)
+            await _send_obj(handle, "initial-handle")
         else:
             import uuid
             from multiprocessing import shared_memory
@@ -207,7 +223,7 @@ class ServerAdapter(BaseRollout):
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
             comm_metadata = {"name": shm_name, "size": bucket_size}
-            s.send_pyobj(comm_metadata)
+            await _send_obj(comm_metadata, "initial-shm-metadata")
 
         await _recv_ack("initial-handshake")
 
@@ -226,7 +242,7 @@ class ServerAdapter(BaseRollout):
             # fill the tensor bucket
             if offset + weight.nbytes > bucket_size:
                 get_torch_device().synchronize()
-                s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
+                await _send_obj({"bucket_meta": bucket_meta, "is_last": False}, "bucket-send")
                 await _recv_ack("bucket-send")
                 bucket_meta = {}
                 offset = 0
@@ -247,7 +263,7 @@ class ServerAdapter(BaseRollout):
 
         # send the last bucket
         get_torch_device().synchronize()
-        s.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
+        await _send_obj({"bucket_meta": bucket_meta, "is_last": True}, "final-bucket")
         await _recv_ack("final-bucket")
 
         # clean up
