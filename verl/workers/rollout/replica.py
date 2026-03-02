@@ -340,10 +340,17 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+def _load_mock():
+    from verl.workers.rollout.mock_rollout import MockReplica
+
+    return MockReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+RolloutReplicaRegistry.register("mock", _load_mock)
 
 
 # Original function for backward compatibility

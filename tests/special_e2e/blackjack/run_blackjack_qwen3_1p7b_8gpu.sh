@@ -7,8 +7,11 @@ PROJECT_ROOT="$(cd "${THIS_DIR}/../../.." && pwd)"
 # Ensure all subprocesses (including Ray/vLLM workers) load local startup shims.
 export PYTHONPATH="${THIS_DIR}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# This rollout path is built around vLLM v1 in current verl.
-export VLLM_USE_V1=1
+ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-mock}"
+export ROLLOUT_BACKEND
+if [[ "${ROLLOUT_BACKEND}" == "vllm" ]]; then
+    export VLLM_USE_V1=1
+fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/tests/special_e2e/blackjack/output}"
 DATA_DIR="${DATA_DIR:-${OUTPUT_DIR}/data}"
@@ -74,13 +77,18 @@ fi
 mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
 echo "Using MODEL_PATH=${MODEL_PATH}"
 echo "HF_HOME=${HF_HOME} HF_HUB_CACHE=${HF_HUB_CACHE} TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE}"
-echo "ROLLOUT_N=${ROLLOUT_N} ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE} ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS} ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS} ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} ROLLOUT_LOAD_FORMAT=${ROLLOUT_LOAD_FORMAT} ROLLOUT_CUDAGRAPH_MODE=${ROLLOUT_CUDAGRAPH_MODE}"
+echo "ROLLOUT_BACKEND=${ROLLOUT_BACKEND} ROLLOUT_N=${ROLLOUT_N} ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE} ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS} ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS} ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} ROLLOUT_LOAD_FORMAT=${ROLLOUT_LOAD_FORMAT} ROLLOUT_CUDAGRAPH_MODE=${ROLLOUT_CUDAGRAPH_MODE}"
 
 python3 - <<'PY'
 import importlib.util
-import sys
+import os
 
-required = ["torch", "ray", "transformers", "datasets", "pyarrow", "vllm", "numpy"]
+backend = os.environ.get("ROLLOUT_BACKEND", "mock")
+required = ["torch", "ray", "transformers", "datasets", "pyarrow", "numpy"]
+if backend == "vllm":
+    required.append("vllm")
+elif backend == "sglang":
+    required.append("sglang")
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     raise SystemExit("Missing required python modules: " + ", ".join(missing))
@@ -116,7 +124,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name="${ROLLOUT_BACKEND}" \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP_SIZE}" \
