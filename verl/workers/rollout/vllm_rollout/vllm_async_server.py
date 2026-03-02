@@ -232,6 +232,18 @@ class vLLMHttpServer:
             if "dtype" not in engine_kwargs:
                 engine_kwargs["dtype"] = engine_kwargs["torch_dtype"]
             engine_kwargs.pop("torch_dtype", None)
+        if (
+            _VLLM_VERSION <= version.parse("0.12.0")
+            and engine_kwargs.get("distributed_executor_backend") == "uni"
+        ):
+            # verl rollout relies on worker_extension_cls for weight sync; vLLM 0.12 is
+            # brittle with uni backend in this path and can fail during engine bootstrap.
+            logger.warning(
+                "vLLM %s detected with distributed_executor_backend=uni; "
+                "forcing mp backend for rollout compatibility.",
+                vllm.__version__,
+            )
+            engine_kwargs["distributed_executor_backend"] = "mp"
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
@@ -304,6 +316,16 @@ class vLLMHttpServer:
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
+        if _VLLM_VERSION <= version.parse("0.12.0"):
+            dropped_keys = {}
+            for k in ("use_inductor", "use_cudagraph"):
+                if k in compilation_config:
+                    dropped_keys[k] = compilation_config.pop(k)
+            if dropped_keys:
+                logger.warning(
+                    "Ignoring unsupported vLLM 0.12 compilation_config keys: %s",
+                    ",".join(sorted(dropped_keys.keys())),
+                )
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE

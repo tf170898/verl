@@ -6,6 +6,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+from packaging import version
+
 from benchmark_blackjack_common import (
     check_runtime_shared_memory,
     MODEL_KEYS,
@@ -45,7 +47,22 @@ def _adjust_train_batch_size(train_bsz: int, rollout_n: int, n_gpus: int) -> int
     return bsz
 
 
+def _vllm_supports_bench_engine_overrides() -> bool:
+    try:
+        from vllm import __version__ as vllm_version
+    except Exception:
+        return False
+    return version.parse(vllm_version) >= version.parse("0.13.0")
+
+
 def _preflight_runtime_dependencies(rollout_backend: str) -> None:
+    if rollout_backend == "hf":
+        raise SystemExit(
+            "rollout_backend=hf is not supported in this verl branch: "
+            "Rollout sync mode is removed and hf async rollout is not registered. "
+            "Please use --rollout-backend vllm."
+        )
+
     required = ("ray", "transformers")
     if rollout_backend == "vllm":
         required = required + ("vllm",)
@@ -232,6 +249,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     _preflight_runtime_dependencies(args.rollout_backend)
+    vllm_supports_bench_engine_overrides = (
+        _vllm_supports_bench_engine_overrides() if args.rollout_backend == "vllm" else False
+    )
+    if args.rollout_backend == "vllm" and not vllm_supports_bench_engine_overrides:
+        print(
+            "Info: vLLM < 0.13 detected; skipping bench-only engine kwargs "
+            "(distributed_executor_backend=uni and compilation_config.use_*)."
+        )
 
     verl_root = args.verl_root.resolve()
     if args.output_root is None:
@@ -402,12 +427,17 @@ def main() -> None:
                     "actor_rollout_ref.rollout.enable_chunked_prefill=false",
                     "actor_rollout_ref.rollout.enable_prefix_caching=false",
                     "actor_rollout_ref.rollout.enforce_eager=true",
-                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
-                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
-                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
                     f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
                 ]
             )
+            if vllm_supports_bench_engine_overrides:
+                train_cmd.extend(
+                    [
+                        "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
+                        "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
+                        "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
+                    ]
+                )
 
         env = os.environ.copy()
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
