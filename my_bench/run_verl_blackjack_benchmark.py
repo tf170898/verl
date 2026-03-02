@@ -386,8 +386,11 @@ def main() -> None:
             "trainer.total_epochs=1",
             f"trainer.total_training_steps={steps}",
         ]
+        legacy_train_backend = "uni" if roll_tp == 1 else "mp"
         if not vllm_supports_bench_engine_overrides:
-            train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+            train_cmd.append(
+                f"++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend={legacy_train_backend}"
+            )
         elif single_gpu_vllm_safe:
             train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
         else:
@@ -405,7 +408,7 @@ def main() -> None:
         env["VLLM_USE_TRITON"] = env.get("VLLM_USE_TRITON", "0")
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if not vllm_supports_bench_engine_overrides:
-            env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0" if roll_tp == 1 else "1"
         elif single_gpu_vllm_safe:
             env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
@@ -487,8 +490,11 @@ def main() -> None:
             "actor_rollout_ref.rollout.enable_prefix_caching=false",
             "actor_rollout_ref.rollout.enforce_eager=true",
         ]
+        legacy_infer_backend = "uni" if infer_tp == 1 else "mp"
         if not vllm_supports_bench_engine_overrides:
-            infer_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+            infer_cmd.append(
+                f"++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend={legacy_infer_backend}"
+            )
         elif single_gpu_vllm_safe:
             infer_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
         else:

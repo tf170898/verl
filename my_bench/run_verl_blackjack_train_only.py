@@ -461,8 +461,11 @@ def main() -> None:
                     f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
                 ]
             )
+            legacy_backend = "uni" if roll_tp == 1 else "mp"
             if not vllm_supports_bench_engine_overrides:
-                train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
+                train_cmd.append(
+                    f"++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend={legacy_backend}"
+                )
             elif single_gpu_vllm_safe:
                 train_cmd.append("++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni")
             else:
@@ -481,8 +484,8 @@ def main() -> None:
             env["VLLM_USE_TRITON"] = env.get("VLLM_USE_TRITON", "0")
             env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             if not vllm_supports_bench_engine_overrides:
-                # vLLM 0.12.x can be unstable in V1 multiprocess startup path.
-                env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+                # Disable V1 multiprocessing only for true single-GPU-per-replica setup.
+                env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0" if roll_tp == 1 else "1"
             elif single_gpu_vllm_safe:
                 env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
