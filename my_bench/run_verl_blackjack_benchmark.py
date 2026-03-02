@@ -29,6 +29,25 @@ def _model_list(model_arg: str) -> list[str]:
     return [model_arg]
 
 
+def _resolve_rollout_tp(desired_tp: int, n_gpus: int) -> int:
+    if n_gpus <= 0:
+        return 1
+    cap = max(1, min(desired_tp, n_gpus))
+    for tp in range(cap, 0, -1):
+        if n_gpus % tp == 0:
+            return tp
+    return 1
+
+
+def _adjust_train_batch_size(train_bsz: int, rollout_n: int, n_gpus: int) -> int:
+    if n_gpus <= 0:
+        return train_bsz
+    bsz = max(1, train_bsz)
+    while (bsz * rollout_n) % n_gpus != 0:
+        bsz += 1
+    return bsz
+
+
 def _preflight_runtime_dependencies() -> None:
     required = ("ray", "transformers", "vllm")
     missing = [m for m in required if importlib.util.find_spec(m) is None]
@@ -237,6 +256,30 @@ def main() -> None:
             infer_resp_len = 128
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
+
+        resolved_roll_tp = _resolve_rollout_tp(roll_tp, args.n_gpus_per_node)
+        if resolved_roll_tp != roll_tp:
+            print(
+                f"Warning: adjusted rollout tensor parallel size from {roll_tp} to {resolved_roll_tp} "
+                f"to match trainer.n_gpus_per_node={args.n_gpus_per_node}."
+            )
+            roll_tp = resolved_roll_tp
+
+        resolved_infer_tp = _resolve_rollout_tp(infer_tp, args.n_gpus_per_node)
+        if resolved_infer_tp != infer_tp:
+            print(
+                f"Warning: adjusted infer tensor parallel size from {infer_tp} to {resolved_infer_tp} "
+                f"to match trainer.n_gpus_per_node={args.n_gpus_per_node}."
+            )
+            infer_tp = resolved_infer_tp
+
+        resolved_train_bsz = _adjust_train_batch_size(train_bsz, rollout_n, args.n_gpus_per_node)
+        if resolved_train_bsz != train_bsz:
+            print(
+                f"Warning: adjusted data.train_batch_size from {train_bsz} to {resolved_train_bsz} "
+                f"so train_batch_size*rollout_n is divisible by n_gpus_per_node={args.n_gpus_per_node}."
+            )
+            train_bsz = resolved_train_bsz
         model_path, use_local_model = _resolve_model_path(model_id)
         print(f"Model {model_key}:       {model_path} (local={use_local_model})")
 
@@ -271,6 +314,7 @@ def main() -> None:
             "++actor_rollout_ref.rollout.free_cache_engine=false",
             "++actor_rollout_ref.rollout.enable_sleep_mode=false",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
+            "actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
             f"actor_rollout_ref.rollout.max_model_len={max_len * 2}",
@@ -372,6 +416,7 @@ def main() -> None:
             "actor_rollout_ref.rollout.name=vllm",
             "actor_rollout_ref.rollout.logprobs_mode=null",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={infer_tp}",
+            "actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={infer_util}",
             "actor_rollout_ref.rollout.n=1",
             "actor_rollout_ref.rollout.temperature=0.0",
