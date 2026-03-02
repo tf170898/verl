@@ -22,6 +22,11 @@ PERF_SUMMARY_PATH="${PERF_SUMMARY_PATH:-${OUTPUT_DIR}/blackjack_perf_summary.jso
 TRAIN_SIZE="${TRAIN_SIZE:-256}"
 VAL_SIZE="${VAL_SIZE:-64}"
 DATASET_SEED="${DATASET_SEED:-42}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-96}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-64}"
+TRAIN_TOTAL_STEPS="${TRAIN_TOTAL_STEPS:-20}"
 
 NUM_GPUS="${NUM_GPUS:-8}"
 ROLLOUT_N="${ROLLOUT_N:-2}"
@@ -90,6 +95,7 @@ echo "HF_HOME=${HF_HOME} HF_HUB_CACHE=${HF_HUB_CACHE} TRANSFORMERS_OFFLINE=${TRA
 echo "ROLLOUT_BACKEND=${ROLLOUT_BACKEND} ROLLOUT_N=${ROLLOUT_N} ROLLOUT_TP_SIZE=${ROLLOUT_TP_SIZE} ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS} ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS} ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} ROLLOUT_LOAD_FORMAT=${ROLLOUT_LOAD_FORMAT} ROLLOUT_CUDAGRAPH_MODE=${ROLLOUT_CUDAGRAPH_MODE}"
 echo "VERL_FORCE_NO_FLASH_ATTN=${VERL_FORCE_NO_FLASH_ATTN}"
 echo "RUN_INFERENCE_STAGE=${RUN_INFERENCE_STAGE} INFER_NUM_SAMPLES=${INFER_NUM_SAMPLES} INFER_BATCH_SIZE=${INFER_BATCH_SIZE}"
+echo "TRAIN_TOTAL_STEPS=${TRAIN_TOTAL_STEPS} TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH} MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH}"
 
 python3 - <<'PY'
 import importlib.util
@@ -125,10 +131,10 @@ python3 -m verl.trainer.main_ppo \
     data.train_files="${DATA_DIR}/train.parquet" \
     data.val_files="${DATA_DIR}/val.parquet" \
     data.return_raw_chat=True \
-    data.max_prompt_length=96 \
-    data.max_response_length=4 \
-    data.train_batch_size=64 \
-    data.val_batch_size=64 \
+    data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
+    data.max_response_length="${MAX_RESPONSE_LENGTH}" \
+    data.train_batch_size="${TRAIN_BATCH_SIZE}" \
+    data.val_batch_size="${VAL_BATCH_SIZE}" \
     data.dataloader_num_workers=0 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.use_remove_padding=False \
@@ -171,7 +177,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     trainer.test_freq=1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=2 \
+    trainer.total_training_steps="${TRAIN_TOTAL_STEPS}" \
     | tee "${LOG_PATH}"
 TRAIN_END_TS="$(date +%s)"
 TRAIN_DURATION_SEC="$((TRAIN_END_TS - TRAIN_START_TS))"
@@ -180,6 +186,7 @@ python3 "${THIS_DIR}/check_blackjack_e2e.py" --output-file "${LOG_PATH}"
 
 if [[ "${RUN_INFERENCE_STAGE}" == "1" ]]; then
     export MODEL_PATH DATA_DIR LOG_PATH PERF_SUMMARY_PATH TRAIN_DURATION_SEC
+    export TRAIN_BATCH_SIZE MAX_PROMPT_LENGTH MAX_RESPONSE_LENGTH TRAIN_TOTAL_STEPS
     export INFER_MODEL_PATH INFER_NUM_SAMPLES INFER_BATCH_SIZE INFER_MAX_NEW_TOKENS INFER_MAX_PROMPT_LEN INFER_CUDA_DEVICE
     python3 - <<'PY'
 import json
@@ -217,6 +224,10 @@ val_path = os.path.join(data_dir, "val.parquet")
 model_path = os.environ.get("INFER_MODEL_PATH") or os.environ["MODEL_PATH"]
 summary_path = os.environ["PERF_SUMMARY_PATH"]
 train_duration_sec = _to_float(os.environ.get("TRAIN_DURATION_SEC")) or 0.0
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", "64"))
+max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "96"))
+max_response_length = int(os.environ.get("MAX_RESPONSE_LENGTH", "4"))
+train_total_steps = int(os.environ.get("TRAIN_TOTAL_STEPS", "20"))
 
 num_samples = int(os.environ.get("INFER_NUM_SAMPLES", "64"))
 batch_size = int(os.environ.get("INFER_BATCH_SIZE", "8"))
@@ -265,7 +276,10 @@ acc_values = []
 valid_action_values = []
 env_reward_values = []
 latency_ms_values = []
+batch_latency_ms_values = []
 generated_tokens = 0
+prompt_tokens = 0
+inference_batches = 0
 
 inference_start = time.perf_counter()
 for start in range(0, sample_count, batch_size):
@@ -284,6 +298,7 @@ for start in range(0, sample_count, batch_size):
         max_length=max_prompt_len,
     )
     tokenized = {k: v.to(device) for k, v in tokenized.items()}
+    prompt_tokens += int(tokenized["attention_mask"].sum().item())
     prompt_len = tokenized["input_ids"].shape[1]
 
     batch_start = time.perf_counter()
@@ -297,6 +312,8 @@ for start in range(0, sample_count, batch_size):
             use_cache=True,
         )
     batch_elapsed = time.perf_counter() - batch_start
+    inference_batches += 1
+    batch_latency_ms_values.append(batch_elapsed * 1000.0)
     per_sample_ms = (batch_elapsed * 1000.0) / max(1, end - start)
     latency_ms_values.extend([per_sample_ms] * (end - start))
 
@@ -324,7 +341,13 @@ for start in range(0, sample_count, batch_size):
         env_reward_values.append(float(score_dict.get("env_reward", 0.0)))
 
 inference_elapsed = time.perf_counter() - inference_start
-tokens_per_sec = generated_tokens / max(inference_elapsed, 1e-9)
+den = max(inference_elapsed, 1e-9)
+output_tokens_per_sec = generated_tokens / den
+input_tokens_per_sec = prompt_tokens / den
+total_tokens = prompt_tokens + generated_tokens
+total_tokens_per_sec = total_tokens / den
+inference_samples_per_sec = sample_count / den
+inference_batches_per_sec = inference_batches / den
 
 with open(log_path, encoding="utf-8") as f:
     log_text = f.read()
@@ -336,6 +359,24 @@ training_summary = {
     "val_valid_action_mean_at_1": _last_metric(log_text, "val-aux/blackjack/valid_action/mean@1"),
     "val_env_reward_mean_at_1": _last_metric(log_text, "val-aux/blackjack/env_reward/mean@1"),
 }
+training_steps = training_summary["global_step"] if training_summary["global_step"] is not None else float(train_total_steps)
+training_steps = max(float(training_steps), 0.0)
+train_tokens_per_step = float(train_batch_size * (max_prompt_length + max_response_length))
+train_samples_processed = training_steps * float(train_batch_size)
+train_tokens_processed_est = training_steps * train_tokens_per_step
+train_den = max(train_duration_sec, 1e-9)
+training_summary.update(
+    {
+        "configured_total_steps": float(train_total_steps),
+        "train_batch_size": float(train_batch_size),
+        "estimated_tokens_per_step": train_tokens_per_step,
+        "estimated_samples_processed": train_samples_processed,
+        "estimated_tokens_processed": train_tokens_processed_est,
+        "throughput_steps_per_sec": training_steps / train_den,
+        "throughput_samples_per_sec": train_samples_processed / train_den,
+        "throughput_tokens_per_sec_estimated": train_tokens_processed_est / train_den,
+    }
+)
 
 inference_summary = {
     "model_path": model_path,
@@ -344,8 +385,16 @@ inference_summary = {
     "max_new_tokens": max_new_tokens,
     "duration_sec": inference_elapsed,
     "latency_ms_per_sample_avg": sum(latency_ms_values) / max(1, len(latency_ms_values)),
+    "latency_ms_per_batch_avg": sum(batch_latency_ms_values) / max(1, len(batch_latency_ms_values)),
+    "num_batches": inference_batches,
+    "prompt_tokens": prompt_tokens,
     "generated_tokens": generated_tokens,
-    "tokens_per_sec": tokens_per_sec,
+    "total_tokens": total_tokens,
+    "throughput_samples_per_sec": inference_samples_per_sec,
+    "throughput_batches_per_sec": inference_batches_per_sec,
+    "throughput_output_tokens_per_sec": output_tokens_per_sec,
+    "throughput_input_tokens_per_sec": input_tokens_per_sec,
+    "throughput_total_tokens_per_sec": total_tokens_per_sec,
     "score_mean": sum(score_values) / max(1, len(score_values)),
     "acc_mean": sum(acc_values) / max(1, len(acc_values)),
     "valid_action_mean": sum(valid_action_values) / max(1, len(valid_action_values)),
