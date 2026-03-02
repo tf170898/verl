@@ -26,29 +26,33 @@ def _model_list(model_arg: str) -> list[str]:
     return [model_arg]
 
 
-def _preflight_runtime_dependencies() -> None:
-    required = ("ray", "transformers", "vllm")
+def _preflight_runtime_dependencies(rollout_backend: str) -> None:
+    required = ("ray", "transformers")
+    if rollout_backend == "vllm":
+        required = required + ("vllm",)
     missing = [m for m in required if importlib.util.find_spec(m) is None]
     if not missing:
-        # vLLM rollout weight sync depends on AsyncLLM.collective_rpc.
-        try:
-            from vllm import __version__ as vllm_version
-            from vllm.v1.engine.async_llm import AsyncLLM
-        except Exception as e:
-            raise SystemExit(f"Failed to import vLLM runtime APIs: {type(e).__name__}: {e}") from e
-        if not hasattr(AsyncLLM, "collective_rpc"):
-            raise SystemExit(
-                "Incompatible vLLM build detected: AsyncLLM.collective_rpc is missing, "
-                "but verl vLLM rollout requires it for weight sync. "
-                f"Detected vllm version: {vllm_version}. "
-                "Please install a compatible vLLM version (for this repo, setup.py expects <=0.12.0)."
-            )
+        if rollout_backend == "vllm":
+            # vLLM rollout weight sync depends on AsyncLLM.collective_rpc.
+            try:
+                from vllm import __version__ as vllm_version
+                from vllm.v1.engine.async_llm import AsyncLLM
+            except Exception as e:
+                raise SystemExit(f"Failed to import vLLM runtime APIs: {type(e).__name__}: {e}") from e
+            if not hasattr(AsyncLLM, "collective_rpc"):
+                raise SystemExit(
+                    "Incompatible vLLM build detected: AsyncLLM.collective_rpc is missing, "
+                    "but verl vLLM rollout requires it for weight sync. "
+                    f"Detected vllm version: {vllm_version}. "
+                    "Please install a compatible vLLM version (for this repo, setup.py expects <=0.12.0)."
+                )
         otel_err = validate_otel_histogram_api()
         if otel_err:
             raise SystemExit(otel_err)
-        shm_warn = check_runtime_shared_memory()
-        if shm_warn:
-            print(f"Warning: {shm_warn}")
+        if rollout_backend == "vllm":
+            shm_warn = check_runtime_shared_memory()
+            if shm_warn:
+                print(f"Warning: {shm_warn}")
         return
     missing_csv = ", ".join(missing)
     raise SystemExit(
@@ -144,9 +148,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--rollout-backend",
-        choices=("vllm",),
+        choices=("vllm", "hf"),
         default="vllm",
-        help="Rollout backend for verl PPO (currently only vllm is supported by this benchmark script).",
+        help="Rollout backend for verl PPO.",
     )
     parser.add_argument(
         "--output-root",
@@ -208,7 +212,7 @@ def main() -> None:
         help="Force very conservative rollout settings to reduce vLLM startup memory.",
     )
     args = parser.parse_args()
-    _preflight_runtime_dependencies()
+    _preflight_runtime_dependencies(args.rollout_backend)
 
     verl_root = args.verl_root.resolve()
     if args.output_root is None:
@@ -329,21 +333,6 @@ def main() -> None:
             f"actor_rollout_ref.actor.fsdp_config.param_offload={actor_offload}",
             "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
             f"actor_rollout_ref.rollout.name={args.rollout_backend}",
-            "++actor_rollout_ref.rollout.free_cache_engine=false",
-            "++actor_rollout_ref.rollout.enable_sleep_mode=false",
-            f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
-            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
-            "actor_rollout_ref.rollout.logprobs_mode=null",
-            f"actor_rollout_ref.rollout.max_model_len={rollout_max_model_len}",
-            f"actor_rollout_ref.rollout.max_num_batched_tokens={rollout_max_num_batched_tokens}",
-            f"actor_rollout_ref.rollout.max_num_seqs={rollout_max_num_seqs}",
-            "actor_rollout_ref.rollout.enable_chunked_prefill=false",
-            "actor_rollout_ref.rollout.enable_prefix_caching=false",
-            "actor_rollout_ref.rollout.enforce_eager=true",
-            "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
-            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
-            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
-            f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
             f"actor_rollout_ref.rollout.n={rollout_n}",
             "algorithm.use_kl_in_reward=false",
             f"reward.custom_reward_function.path={reward_fn_path}",
@@ -361,19 +350,40 @@ def main() -> None:
             "trainer.total_epochs=1",
             f"trainer.total_training_steps={steps}",
         ]
+        if args.rollout_backend == "vllm":
+            train_cmd.extend(
+                [
+                    "++actor_rollout_ref.rollout.free_cache_engine=false",
+                    "++actor_rollout_ref.rollout.enable_sleep_mode=false",
+                    f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
+                    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
+                    "actor_rollout_ref.rollout.logprobs_mode=null",
+                    f"actor_rollout_ref.rollout.max_model_len={rollout_max_model_len}",
+                    f"actor_rollout_ref.rollout.max_num_batched_tokens={rollout_max_num_batched_tokens}",
+                    f"actor_rollout_ref.rollout.max_num_seqs={rollout_max_num_seqs}",
+                    "actor_rollout_ref.rollout.enable_chunked_prefill=false",
+                    "actor_rollout_ref.rollout.enable_prefix_caching=false",
+                    "actor_rollout_ref.rollout.enforce_eager=true",
+                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
+                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
+                    "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
+                    f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
+                ]
+            )
 
         env = os.environ.copy()
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         if args.rollout_backend == "vllm":
             env["VLLM_USE_V1"] = "1"
-        env.setdefault("VLLM_USE_TRITON", "0")
-        env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+            env.setdefault("VLLM_USE_TRITON", "0")
+            env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")
-        env.setdefault("VERL_BENCH_TRITON_CONSTEXPR_SHIM", "1")
-        py_path = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{bench_dir}:{py_path}" if py_path else str(bench_dir)
+        if args.rollout_backend == "vllm":
+            env.setdefault("VERL_BENCH_TRITON_CONSTEXPR_SHIM", "1")
+            py_path = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = f"{bench_dir}:{py_path}" if py_path else str(bench_dir)
         if use_local_model:
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"
