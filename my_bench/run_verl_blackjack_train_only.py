@@ -164,6 +164,7 @@ def main() -> None:
     metrics_dir = out_root / "metrics"
     file_logger_root = metrics_dir / "verl_file_logger"
     reward_fn_path = (Path(__file__).resolve().parent / "blackjack_reward_fn.py").resolve()
+    bench_dir = Path(__file__).resolve().parent
     summary_csv = out_root / "summary.csv"
     summary_md = out_root / "summary.md"
 
@@ -198,7 +199,8 @@ def main() -> None:
             train_bsz = 64
             mini_bsz = 32
             max_len = 256
-            roll_tp = 2
+            # Keep TP=1 for 1.7B to avoid extra intra-engine distributed rendezvous fragility.
+            roll_tp = 1
             roll_util = 0.70
             actor_offload = "false"
             rollout_n = 2
@@ -251,6 +253,8 @@ def main() -> None:
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
+            "actor_rollout_ref.rollout.enforce_eager=true",
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config={"level":0,"use_inductor":false,"use_cudagraph":false}',
             f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
             f"actor_rollout_ref.rollout.n={rollout_n}",
             "algorithm.use_kl_in_reward=false",
@@ -273,9 +277,13 @@ def main() -> None:
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
         if args.rollout_backend == "vllm":
             env["VLLM_USE_V1"] = "1"
+        env.setdefault("VLLM_USE_TRITON", "0")
         env.setdefault("RAY_DISABLE_DASHBOARD", "1")
         env.setdefault("RAY_USAGE_STATS_ENABLED", "0")
         env.setdefault("RAY_raylet_start_wait_time_s", "300")
+        env.setdefault("VERL_BENCH_TRITON_CONSTEXPR_SHIM", "1")
+        py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{bench_dir}:{py_path}" if py_path else str(bench_dir)
         if use_local_model:
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"

@@ -35,6 +35,18 @@ def validate_otel_histogram_api() -> str | None:
             f"{type(e).__name__}: {e}"
         )
 
+    try:
+        # Ray dashboard agent imports this module during startup.
+        from opentelemetry.exporter.prometheus import PrometheusMetricReader  # noqa: F401
+    except Exception as e:
+        return (
+            "Incompatible OpenTelemetry installation detected for Ray dashboard agent: "
+            f"{type(e).__name__}: {e}. "
+            "Install aligned package versions for opentelemetry-api, "
+            "opentelemetry-sdk, opentelemetry-exporter-prometheus, and "
+            "opentelemetry-semantic-conventions."
+        )
+
     if "explicit_bucket_boundaries_advisory" not in params:
         return (
             "Incompatible OpenTelemetry installation detected for Ray dashboard agent: "
