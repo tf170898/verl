@@ -17,18 +17,26 @@ from msgspec import field
 from packaging import version as vs
 
 try:
-    from vllm.lora.lora_model import LoRAModel
-except ImportError:
-    from vllm.lora.models import LoRAModel
+    import triton.language as tl
 
-from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+    if not hasattr(tl, "constexpr_function") and hasattr(tl, "constexpr"):
+        tl.constexpr_function = tl.constexpr
+except Exception:
+    pass
+
+try:
+    from vllm.lora.request import LoRARequest as _LoRARequestBase
+except Exception:
+    # Keep rollout importable even when vLLM LoRA stack is unavailable/incompatible.
+    class _LoRARequestBase:  # type: ignore[too-many-ancestors]
+        def __init__(self, *args, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
 from verl.third_party.vllm import get_version
 
 
-class TensorLoRARequest(LoRARequest):
+class TensorLoRARequest(_LoRARequestBase):
     peft_config: dict = field(default=None)
     lora_tensors: dict = field(default=None)
 
@@ -36,6 +44,19 @@ class TensorLoRARequest(LoRARequest):
 class VLLMHijack:
     @staticmethod
     def hijack():
+        try:
+            try:
+                from vllm.lora.lora_model import LoRAModel
+            except ImportError:
+                from vllm.lora.models import LoRAModel
+
+            from vllm.lora.utils import get_adapter_absolute_path
+            from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+        except Exception:
+            # If LoRA dependencies cannot be loaded (e.g., triton/vllm mismatch),
+            # skip hijack so non-LoRA rollout paths can still run.
+            return
+
         def hijack__load_adapter(self, lora_request: TensorLoRARequest) -> LoRAModel:
             """
             based on vllm.lora.worker_manager.WorkerLoRAManager._load_adapter, support load adapter with lora tensors
