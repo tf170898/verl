@@ -169,7 +169,28 @@ class ServerAdapter(BaseRollout):
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
         bucket_size = int(bucket_size_mb) << 20
         s = self.zmq_context.socket(zmq.REQ)
+        # Avoid hanging forever when rollout worker-side RPC fails to start.
+        # Configurable via VERL_VLLM_WEIGHT_SYNC_TIMEOUT_MS (default: 30s).
+        timeout_ms = int(os.environ.get("VERL_VLLM_WEIGHT_SYNC_TIMEOUT_MS", "30000"))
+        s.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        s.setsockopt(zmq.SNDTIMEO, timeout_ms)
         s.bind(self.zmq_handle)
+
+        async def _recv_ack(stage: str) -> None:
+            try:
+                s.recv()
+            except zmq.error.Again as e:
+                if future is not None:
+                    ready, _ = ray.wait([future], timeout=0)
+                    if ready:
+                        # Surface the original worker-side exception when available.
+                        await future
+                raise TimeoutError(
+                    "Timed out waiting for rollout weight-sync acknowledgment "
+                    f"at stage '{stage}' after {timeout_ms}ms. "
+                    "This often indicates a vLLM/verl incompatibility "
+                    "(e.g., missing collective RPC support in installed vLLM)."
+                ) from e
 
         buffer, shm = None, None
         if not self.use_shm:
@@ -188,7 +209,7 @@ class ServerAdapter(BaseRollout):
             comm_metadata = {"name": shm_name, "size": bucket_size}
             s.send_pyobj(comm_metadata)
 
-        s.recv()
+        await _recv_ack("initial-handshake")
 
         # send bucket weights
         offset = 0
@@ -206,7 +227,7 @@ class ServerAdapter(BaseRollout):
             if offset + weight.nbytes > bucket_size:
                 get_torch_device().synchronize()
                 s.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                s.recv()
+                await _recv_ack("bucket-send")
                 bucket_meta = {}
                 offset = 0
 
@@ -227,7 +248,7 @@ class ServerAdapter(BaseRollout):
         # send the last bucket
         get_torch_device().synchronize()
         s.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-        s.recv()
+        await _recv_ack("final-bucket")
 
         # clean up
         s.close()

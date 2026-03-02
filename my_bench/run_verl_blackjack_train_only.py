@@ -7,13 +7,10 @@ import os
 from pathlib import Path
 
 from benchmark_blackjack_common import (
-    INFER_PROMPTS_TARGET,
     MODEL_KEYS,
     calc_rate,
     now_tag,
-    parse_verl_infer_accuracy,
     parse_verl_train_metrics,
-    prepare_infer_subset,
     resolve_blackjack_data,
     run_with_logging,
     write_summary_csv,
@@ -86,7 +83,7 @@ def _resolve_model_path(model_id: str) -> tuple[str, bool]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run blackjack benchmark for verl only.")
+    parser = argparse.ArgumentParser(description="Run blackjack benchmark (verl train only).")
     parser.add_argument(
         "--verl-root",
         type=Path,
@@ -122,20 +119,20 @@ def main() -> None:
         "--attn-impl",
         choices=("sdpa", "eager", "flash_attention_2", "flash_attention_3"),
         default="sdpa",
-        help="HF attention implementation for verl model loading. Default avoids flash-attn ABI issues.",
+        help="HF attention implementation for verl model loading.",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
         default=None,
-        help="Benchmark output dir. Default: my_bench/results/verl_<timestamp>",
+        help="Output dir. Default: my_bench/results/verl_train_only_<timestamp>",
     )
     args = parser.parse_args()
     _preflight_runtime_dependencies()
 
     verl_root = args.verl_root.resolve()
     if args.output_root is None:
-        out_root = verl_root / "my_bench" / "results" / f"verl_{now_tag()}"
+        out_root = verl_root / "my_bench" / "results" / f"verl_train_only_{now_tag()}"
     else:
         out_root = args.output_root.resolve()
 
@@ -158,8 +155,6 @@ def main() -> None:
         test_samples=args.test_samples,
         prefer_existing_env_parquet=args.use_env_parquet,
     )
-    infer_subset = data_dir / f"blackjack_test_{INFER_PROMPTS_TARGET}.parquet"
-    infer_prompts = prepare_infer_subset(test_parquet, infer_subset, INFER_PROMPTS_TARGET)
 
     print(f"Using blackjack env dir: {env_dir}")
     print(f"Using train parquet: {train_parquet}")
@@ -184,9 +179,6 @@ def main() -> None:
             roll_util = 0.70
             actor_offload = "false"
             rollout_n = 2
-            infer_tp = 1
-            infer_util = 0.85
-            infer_resp_len = 256
         elif model_key == "qwen3-32b":
             model_id = "Qwen/Qwen3-32B"
             steps = 12
@@ -197,11 +189,9 @@ def main() -> None:
             roll_util = 0.60
             actor_offload = "true"
             rollout_n = 1
-            infer_tp = 4
-            infer_util = 0.70
-            infer_resp_len = 128
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
+
         model_path, use_local_model = _resolve_model_path(model_id)
         print(f"Model {model_key}:       {model_path} (local={use_local_model})")
 
@@ -254,17 +244,16 @@ def main() -> None:
             "trainer.total_epochs=1",
             f"trainer.total_training_steps={steps}",
         ]
+
         env = os.environ.copy()
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
-        # verl vLLM async server uses v1 AsyncLLM APIs.
         env["VLLM_USE_V1"] = "1"
         if use_local_model:
-            # Prevent remote hub calls when local model files are available.
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"
-        # Avoid NCCL shared-memory allocation failures on small /dev/shm setups.
         env.setdefault("NCCL_SHM_DISABLE", "1")
         env.setdefault("NCCL_CUMEM_HOST_ENABLE", "0")
+
         print(f"==> verl train ({model_key})")
         train_ret, train_elapsed = run_with_logging(
             cwd=verl_root,
@@ -276,11 +265,7 @@ def main() -> None:
         train_throughput = f"{calc_rate(steps, train_elapsed):.3f}" if train_ret == 0 else "0.000"
         train_step, train_loss, train_reward = ("na", "na", "na")
         if train_ret == 0:
-            file_logger_jsonl = (
-                file_logger_root
-                / "bench_verl_blackjack"
-                / f"verl_train_{model_key}.jsonl"
-            )
+            file_logger_jsonl = file_logger_root / "bench_verl_blackjack" / f"verl_train_{model_key}.jsonl"
             train_step, train_loss, train_reward = parse_verl_train_metrics(file_logger_jsonl)
 
         rows.append(
@@ -301,60 +286,8 @@ def main() -> None:
             }
         )
 
-        infer_out = out_root / f"verl_infer_{model_key}.parquet"
-        infer_log = logs_dir / f"verl_infer_{model_key}.log"
-        infer_cmd = [
-            "python3",
-            "-m",
-            "verl.trainer.main_generation_server",
-            "trainer.nnodes=1",
-            "trainer.n_gpus_per_node=8",
-            f"data.train_files={infer_subset}",
-            "data.prompt_key=prompt",
-            f"+data.output_path={infer_out}",
-            f"actor_rollout_ref.model.path={model_path}",
-            "actor_rollout_ref.model.trust_remote_code=true",
-            f"+actor_rollout_ref.model.override_config.attn_implementation={args.attn_impl}",
-            "actor_rollout_ref.rollout.name=vllm",
-            "actor_rollout_ref.rollout.logprobs_mode=null",
-            f"actor_rollout_ref.rollout.tensor_model_parallel_size={infer_tp}",
-            f"actor_rollout_ref.rollout.gpu_memory_utilization={infer_util}",
-            "actor_rollout_ref.rollout.n=1",
-            "actor_rollout_ref.rollout.temperature=0.0",
-            "actor_rollout_ref.rollout.top_p=1.0",
-            f"actor_rollout_ref.rollout.response_length={infer_resp_len}",
-        ]
-        print(f"==> verl infer ({model_key})")
-        infer_ret, infer_elapsed = run_with_logging(
-            cwd=verl_root,
-            cmd=infer_cmd,
-            log_file=infer_log,
-            env=env,
-        )
-        infer_status = "ok" if infer_ret == 0 else "fail"
-        infer_throughput = f"{calc_rate(infer_prompts, infer_elapsed):.3f}" if infer_ret == 0 else "0.000"
-        infer_acc = parse_verl_infer_accuracy(infer_out) if infer_ret == 0 else "na"
-
-        rows.append(
-            {
-                "framework": "verl",
-                "phase": "infer",
-                "model": model_key,
-                "status": infer_status,
-                "elapsed_sec": f"{infer_elapsed:.3f}",
-                "throughput": infer_throughput,
-                "unit": "req/s",
-                "train_step": "na",
-                "train_loss": "na",
-                "train_reward": "na",
-                "extra_metric_name": "action_acc",
-                "extra_metric": infer_acc,
-                "log_file": str(infer_log),
-            }
-        )
-
     write_summary_csv(summary_csv, rows)
-    write_summary_md(summary_md, rows, title="Verl Blackjack Benchmark Summary")
+    write_summary_md(summary_md, rows, title="Verl Blackjack Train-Only Summary")
     print(f"Summary CSV: {summary_csv}")
     print(f"Summary MD:  {summary_md}")
 
