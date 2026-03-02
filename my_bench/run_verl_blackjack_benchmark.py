@@ -147,6 +147,18 @@ def main() -> None:
         default=None,
         help="Benchmark output dir. Default: my_bench/results/verl_<timestamp>",
     )
+    parser.add_argument(
+        "--n-gpus-per-node",
+        type=int,
+        default=8,
+        help="Number of GPUs used by trainer on one node.",
+    )
+    parser.add_argument(
+        "--rollout-agent-workers",
+        type=int,
+        default=8,
+        help="Number of rollout agent workers.",
+    )
     args = parser.parse_args()
     _preflight_runtime_dependencies()
 
@@ -258,7 +270,10 @@ def main() -> None:
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
             "actor_rollout_ref.rollout.enforce_eager=true",
-            '++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config={"level":0,"use_inductor":false,"use_cudagraph":false}',
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.level=0",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
             f"actor_rollout_ref.rollout.n={rollout_n}",
             "algorithm.use_kl_in_reward=false",
@@ -270,7 +285,8 @@ def main() -> None:
             f"trainer.experiment_name=verl_train_{model_key}",
             "++ray_kwargs.ray_init.include_dashboard=false",
             "trainer.nnodes=1",
-            "trainer.n_gpus_per_node=8",
+            f"trainer.n_gpus_per_node={args.n_gpus_per_node}",
+            f"actor_rollout_ref.rollout.agent.num_workers={args.rollout_agent_workers}",
             "trainer.save_freq=-1",
             "trainer.test_freq=100000",
             "trainer.total_epochs=1",
@@ -337,7 +353,7 @@ def main() -> None:
             "-m",
             "verl.trainer.main_generation_server",
             "trainer.nnodes=1",
-            "trainer.n_gpus_per_node=8",
+            f"trainer.n_gpus_per_node={args.n_gpus_per_node}",
             f"data.train_files={infer_subset}",
             "data.prompt_key=prompt",
             f"+data.output_path={infer_out}",
@@ -352,6 +368,11 @@ def main() -> None:
             "actor_rollout_ref.rollout.temperature=0.0",
             "actor_rollout_ref.rollout.top_p=1.0",
             f"actor_rollout_ref.rollout.response_length={infer_resp_len}",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
+            "actor_rollout_ref.rollout.enforce_eager=true",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.level=0",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
+            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
         ]
         print(f"==> verl infer ({model_key})")
         infer_ret, infer_elapsed = run_with_logging(
