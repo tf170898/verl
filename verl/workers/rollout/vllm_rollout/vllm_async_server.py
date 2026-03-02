@@ -22,18 +22,24 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import ray
+# This server path relies on vLLM v1 AsyncLLM APIs.
+os.environ["VLLM_USE_V1"] = "1"
 import vllm.entrypoints.cli.serve
 from packaging import version
 from ray.actor import ActorHandle
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.cli.serve import run_headless
 from vllm.entrypoints.openai.api_server import build_app, init_app_state
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
+
+try:
+    from vllm.entrypoints.cli.serve import run_headless
+except ImportError:
+    run_headless = None
 
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword
@@ -474,6 +480,12 @@ class vLLMHttpServer:
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
+        if run_headless is None:
+            raise RuntimeError(
+                "Installed vLLM does not expose `run_headless` in vllm.entrypoints.cli.serve. "
+                "This usually indicates a vLLM/verl API mismatch. "
+                "For single-node runs this path should not be used; for multi-node runs pin a compatible vLLM."
+            )
 
         def run_headless_wrapper():
             with SuppressSignalInThread():

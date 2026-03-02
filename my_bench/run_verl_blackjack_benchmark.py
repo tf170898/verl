@@ -26,6 +26,51 @@ def _model_list(model_arg: str) -> list[str]:
     return [model_arg]
 
 
+def _find_hf_cache_snapshot(model_id: str) -> Path | None:
+    cache_root = (
+        os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HUGGINGFACE_HUB_CACHE")
+        or str(Path.home() / ".cache" / "huggingface" / "hub")
+    )
+    repo_dir = Path(cache_root) / f"models--{model_id.replace('/', '--')}" / "snapshots"
+    if not repo_dir.exists():
+        return None
+    cands = [p for p in repo_dir.iterdir() if p.is_dir()]
+    if not cands:
+        return None
+    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return cands[0]
+
+
+def _resolve_model_path(model_id: str) -> tuple[str, bool]:
+    env_name = {
+        "Qwen/Qwen3-1.7B": "VERL_BENCH_QWEN3_1_7B_PATH",
+        "Qwen/Qwen3-32B": "VERL_BENCH_QWEN3_32B_PATH",
+    }.get(model_id)
+    if env_name:
+        forced = os.environ.get(env_name)
+        if forced:
+            forced_path = Path(forced).expanduser()
+            if forced_path.exists():
+                return str(forced_path.resolve()), True
+            print(f"Warning: {env_name} is set but path does not exist: {forced_path}")
+
+    local_cands = [
+        Path("/models") / model_id,
+        Path("/model") / model_id,
+        Path("/verl/models") / model_id,
+        Path.home() / "models" / model_id,
+    ]
+    cache_snapshot = _find_hf_cache_snapshot(model_id)
+    if cache_snapshot is not None:
+        local_cands.insert(0, cache_snapshot)
+
+    for p in local_cands:
+        if p.exists():
+            return str(p.resolve()), True
+    return model_id, False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run blackjack benchmark for verl only.")
     parser.add_argument(
@@ -42,6 +87,12 @@ def main() -> None:
     )
     parser.add_argument("--train-samples", type=int, default=4096)
     parser.add_argument("--test-samples", type=int, default=512)
+    parser.add_argument(
+        "--attn-impl",
+        choices=("sdpa", "eager", "flash_attention_2", "flash_attention_3"),
+        default="sdpa",
+        help="HF attention implementation for verl model loading. Default avoids flash-attn ABI issues.",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -81,12 +132,13 @@ def main() -> None:
     print(f"Using train parquet: {train_parquet}")
     print(f"Using test parquet:  {test_parquet}")
     print(f"Output root:         {out_root}")
+    print(f"Attention impl:      {args.attn_impl}")
 
     rows: list[dict[str, str]] = []
 
     for model_key in _model_list(args.model):
         if model_key == "qwen3-1.7b":
-            model_path = "Qwen/Qwen3-1.7B"
+            model_id = "Qwen/Qwen3-1.7B"
             steps = 20
             train_bsz = 64
             mini_bsz = 32
@@ -99,7 +151,7 @@ def main() -> None:
             infer_util = 0.85
             infer_resp_len = 256
         elif model_key == "qwen3-32b":
-            model_path = "Qwen/Qwen3-32B"
+            model_id = "Qwen/Qwen3-32B"
             steps = 12
             train_bsz = 16
             mini_bsz = 8
@@ -113,6 +165,8 @@ def main() -> None:
             infer_resp_len = 128
         else:
             raise ValueError(f"Unsupported model key: {model_key}")
+        model_path, use_local_model = _resolve_model_path(model_id)
+        print(f"Model {model_key}:       {model_path} (local={use_local_model})")
 
         train_log = logs_dir / f"verl_train_{model_key}.log"
         train_cmd = [
@@ -131,6 +185,8 @@ def main() -> None:
             "data.truncation=error",
             f"actor_rollout_ref.model.path={model_path}",
             "actor_rollout_ref.model.trust_remote_code=true",
+            f"+actor_rollout_ref.model.override_config.attn_implementation={args.attn_impl}",
+            f"+critic.model.override_config.attn_implementation={args.attn_impl}",
             "actor_rollout_ref.model.use_remove_padding=true",
             "actor_rollout_ref.model.enable_gradient_checkpointing=true",
             "actor_rollout_ref.actor.optim.lr=1e-6",
@@ -142,6 +198,7 @@ def main() -> None:
             "actor_rollout_ref.rollout.name=vllm",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
+            "actor_rollout_ref.rollout.logprobs_mode=null",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
             f"actor_rollout_ref.rollout.n={rollout_n}",
             "algorithm.use_kl_in_reward=false",
@@ -160,6 +217,15 @@ def main() -> None:
         ]
         env = os.environ.copy()
         env["VERL_FILE_LOGGER_ROOT"] = str(file_logger_root)
+        # verl vLLM async server uses v1 AsyncLLM APIs.
+        env["VLLM_USE_V1"] = "1"
+        if use_local_model:
+            # Prevent remote hub calls when local model files are available.
+            env["HF_HUB_OFFLINE"] = "1"
+            env["TRANSFORMERS_OFFLINE"] = "1"
+        # Avoid NCCL shared-memory allocation failures on small /dev/shm setups.
+        env.setdefault("NCCL_SHM_DISABLE", "1")
+        env.setdefault("NCCL_CUMEM_HOST_ENABLE", "0")
         print(f"==> verl train ({model_key})")
         train_ret, train_elapsed = run_with_logging(
             cwd=verl_root,
@@ -205,10 +271,12 @@ def main() -> None:
             "trainer.n_gpus_per_node=8",
             f"data.train_files={infer_subset}",
             "data.prompt_key=prompt",
-            f"data.output_path={infer_out}",
+            f"+data.output_path={infer_out}",
             f"actor_rollout_ref.model.path={model_path}",
             "actor_rollout_ref.model.trust_remote_code=true",
+            f"+actor_rollout_ref.model.override_config.attn_implementation={args.attn_impl}",
             "actor_rollout_ref.rollout.name=vllm",
+            "actor_rollout_ref.rollout.logprobs_mode=null",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={infer_tp}",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={infer_util}",
             "actor_rollout_ref.rollout.n=1",
@@ -252,4 +320,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
