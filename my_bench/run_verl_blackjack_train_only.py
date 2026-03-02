@@ -213,9 +213,9 @@ def main() -> None:
             max_len = 256
             # Keep TP=1 for 1.7B to avoid extra intra-engine distributed rendezvous fragility.
             roll_tp = 1
-            roll_util = 0.70
+            roll_util = 0.40
             actor_offload = "false"
-            rollout_n = 2
+            rollout_n = 1
         elif model_key == "qwen3-32b":
             model_id = "Qwen/Qwen3-32B"
             steps = 12
@@ -265,9 +265,13 @@ def main() -> None:
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={roll_tp}",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
             "actor_rollout_ref.rollout.logprobs_mode=null",
+            f"actor_rollout_ref.rollout.max_model_len={max_len * 2}",
+            f"actor_rollout_ref.rollout.max_num_batched_tokens={max_len * 4}",
+            "actor_rollout_ref.rollout.max_num_seqs=8",
+            "actor_rollout_ref.rollout.enable_chunked_prefill=false",
+            "actor_rollout_ref.rollout.enable_prefix_caching=false",
             "actor_rollout_ref.rollout.enforce_eager=true",
             "++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
-            "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.level=0",
             "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_inductor=false",
             "++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.use_cudagraph=false",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={roll_util}",
